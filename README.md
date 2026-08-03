@@ -6,7 +6,6 @@
 [![Express.js](https://img.shields.io/badge/Express.js-4.x-black.svg)](https://expressjs.com/)
 [![MongoDB](https://img.shields.io/badge/MongoDB-Mongoose%208.x-47A248.svg)](https://www.mongodb.com/)
 [![Swagger](https://img.shields.io/badge/Swagger-OpenAPI%203.0-85EA2D.svg)](http://localhost:5000/api/docs)
-[![License](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
 ---
 
@@ -16,6 +15,7 @@
   * Email & Password Authentication (bcrypt hashing with 12 salt rounds).
   * Stateless JWT authentication with role-based access control (`seeker`, `owner`, `admin`).
   * Seamless Google OAuth 2.0 Integration via Passport.js (guarded for non-configured environments).
+
 * 🏢 **Listings Management**
   * Full CRUD for PG/Hostel properties.
   * Advanced multi-filter search (by area, rent range, PG type, gender preference, amenities, sharing options, and verification status).
@@ -23,18 +23,22 @@
   * Geospatial search indexing (`2dsphere` on MongoDB) for coordinate-based location queries.
   * Auto-promotion of user role (`seeker` ➔ `owner`) upon creating their first listing.
   * Soft-deletion of listings with automatic AWS S3 photo batch cleanup.
+
 * 📷 **AWS S3 Photo Uploads**
   * Direct multipart photo uploads via `multer` memory buffers piped to AWS S3.
   * Strict file type validation (JPEG, PNG, WebP) and size limits (5MB per photo, max 10 photos per listing).
   * Granular photo deletion by S3 key.
+
 * 📩 **Enquiries & WhatsApp Integration**
   * Public enquiry submission (supports both logged-in users and anonymous visitors).
   * Dedicated Owner Inbox to view, filter, and update enquiry statuses (`new`, `seen`, `closed`).
   * Dynamic WhatsApp link generator (`wa.me`) with pre-filled message templates.
+
 * 🛡️ **Admin Dashboard Capabilities**
   * Review and manage all listings across active, inactive, and deleted states.
   * Grant/revoke the **"Assured" Verified Badge** to property listings.
   * Manage users, search user directories, and promote/demote roles safely.
+
 * 📖 **Interactive API Documentation**
   * Built-in Swagger UI at `/api/docs` powered by an OpenAPI 3.0 specification with JWT persistence.
 
@@ -126,7 +130,7 @@ roof-on-click-server/
    AWS_S3_BUCKET_NAME=roofOnClick-listings
 
    # Frontend Client URL
-   FRONTEND_URL=https://stayynest.vercel.app
+   FRONTEND_URL=https://your-frontend-domain.com
    ```
 
 4. **Run the Development Server:**
