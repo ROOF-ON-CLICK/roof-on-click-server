@@ -182,8 +182,3 @@ http://localhost:5000/api/docs
 * **CORS Handling:** Dynamic origin switching based on `ENV` mode (`dev` vs `prod`).
 * **Input Validation:** Strict request body sanitization and validation using `express-validator`.
 
----
-
-## 📄 License
-
-This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
