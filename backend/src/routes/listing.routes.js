@@ -27,6 +27,12 @@ const listingValidation = [
   body('gender').isIn(['boys', 'girls', 'co-ed']).withMessage('Invalid gender option'),
   body('rent.monthly').isNumeric().withMessage('Monthly rent must be a number'),
   body('address.area').trim().notEmpty().withMessage('Area is required'),
+  body('address.city').trim().notEmpty().withMessage('City is required'),
+  body('ownerWhatsapp')
+    .optional()
+    .trim()
+    .matches(/^(\+91|91)?[6-9]\d{9}$/)
+    .withMessage('Invalid Indian mobile number. Must be a 10-digit number starting with 6-9, optionally prefixed with +91 or 91'),
 ];
 
 // ─── Public Routes ────────────────────────────────────────────────────────────

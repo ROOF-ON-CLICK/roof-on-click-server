@@ -328,6 +328,7 @@ const swaggerSpec = {
         summary: 'Browse all active listings',
         description: 'Supports filters, pagination, and sorting. Saves search history for authenticated users.',
         parameters: [
+          { in: 'query', name: 'city', schema: { type: 'string' }, example: 'Indore', description: 'Filter by city' },
           { in: 'query', name: 'area', schema: { type: 'string' }, example: 'Vijay Nagar' },
           { in: 'query', name: 'type', schema: { type: 'string', enum: ['hostel', 'pg', 'shared-room', 'private-room'] } },
           { in: 'query', name: 'gender', schema: { type: 'string', enum: ['boys', 'girls', 'co-ed'] } },

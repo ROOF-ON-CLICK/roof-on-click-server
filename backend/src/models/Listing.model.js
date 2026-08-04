@@ -38,7 +38,7 @@ const listingSchema = new mongoose.Schema(
       },
       city: {
         type: String,
-        default: 'Indore',
+        required: [true, 'City is required'],
         trim: true,
       },
       pincode: { type: String, trim: true },
@@ -146,8 +146,8 @@ const listingSchema = new mongoose.Schema(
 // Geospatial index for location-based queries
 listingSchema.index({ 'address.coordinates': '2dsphere' });
 
-// Compound index for common filter combinations
-listingSchema.index({ 'address.area': 1, 'rent.monthly': 1, gender: 1 });
+// Compound index for common filter combinations — city is the leading key
+listingSchema.index({ 'address.city': 1, 'address.area': 1, 'rent.monthly': 1, gender: 1 });
 
 // Additional indexes for filtering
 listingSchema.index({ type: 1, status: 1 });
