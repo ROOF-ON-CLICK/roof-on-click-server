@@ -218,10 +218,80 @@ const swaggerSpec = {
     '/api/auth/logout': {
       post: {
         tags: ['Auth'],
-        summary: 'Logout (stateless — client should clear the token)',
+        summary: 'Logout — revokes current Access Token (jti blocklist) + destroys RT session',
+        security: [{ bearerAuth: [] }],
+        requestBody: {
+          content: {
+            'application/json': {
+              schema: {
+                type: 'object',
+                properties: {
+                  refreshToken: { type: 'string', description: 'Refresh token to destroy the session' },
+                },
+              },
+            },
+          },
+        },
+        responses: {
+          200: { description: 'Logged out successfully' },
+          401: { description: 'Unauthorized' },
+        },
+      },
+    },
+    '/api/auth/logout-all': {
+      post: {
+        tags: ['Auth'],
+        summary: 'Logout from all devices — invalidates all active sessions via Redis user_revoked timestamp',
         security: [{ bearerAuth: [] }],
         responses: {
-          200: { description: 'Logout acknowledged' },
+          200: { description: 'Logged out from all devices' },
+          401: { description: 'Unauthorized' },
+        },
+      },
+    },
+    '/api/auth/refresh': {
+      post: {
+        tags: ['Auth'],
+        summary: 'Refresh Access Token using a valid Refresh Token',
+        description:
+          'Non-rotating — the Refresh Token stays the same. Only a new Access Token is issued. ' +
+          'The RT session TTL is slid (reset to 7 days) on every successful refresh.',
+        requestBody: {
+          required: true,
+          content: {
+            'application/json': {
+              schema: {
+                type: 'object',
+                required: ['refreshToken'],
+                properties: {
+                  refreshToken: { type: 'string', description: 'The long-lived refresh token from login' },
+                },
+              },
+            },
+          },
+        },
+        responses: {
+          200: {
+            description: 'New Access Token issued',
+            content: {
+              'application/json': {
+                schema: {
+                  type: 'object',
+                  properties: {
+                    success: { type: 'boolean' },
+                    data: {
+                      type: 'object',
+                      properties: {
+                        accessToken: { type: 'string' },
+                        expiresIn: { type: 'number', example: 3600, description: 'Seconds until AT expiry' },
+                      },
+                    },
+                  },
+                },
+              },
+            },
+          },
+          401: { description: 'Invalid, expired, or revoked refresh token' },
         },
       },
     },
@@ -239,14 +309,15 @@ const swaggerSpec = {
     '/api/auth/google/callback': {
       get: {
         tags: ['Auth'],
-        summary: 'Google OAuth callback — issues JWT and redirects to frontend',
-        description: 'Handled by Passport. Redirects to `FRONTEND_URL/auth/callback?token=<jwt>`',
+        summary: 'Google OAuth callback — issues AT + RT pair and redirects to frontend',
+        description: 'Handled by Passport. Redirects to `FRONTEND_URL/auth/callback?accessToken=<at>&refreshToken=<rt>`',
         responses: {
-          302: { description: 'Redirect to frontend with JWT token' },
+          302: { description: 'Redirect to frontend with token pair' },
           503: { description: 'OAuth not configured on this server' },
         },
       },
     },
+
 
     // ══════════════════════════════════════════════════════════════════════════
     // LISTINGS

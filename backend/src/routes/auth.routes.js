@@ -3,7 +3,7 @@ const passport = require('passport');
 const { body } = require('express-validator');
 const rateLimit = require('express-rate-limit');
 
-const { register, login, logout, getMe, googleCallback } = require('../controllers/auth.controller');
+const { register, login, refresh, logout, logoutAll, getMe, googleCallback } = require('../controllers/auth.controller');
 const { verifyToken } = require('../middleware/auth.middleware');
 
 const router = express.Router();
@@ -49,7 +49,16 @@ const oauthGuard = (req, res, next) => {
 router.post('/register', authLimiter, registerValidation, register);
 router.post('/login', authLimiter, loginValidation, login);
 router.post('/logout', verifyToken, logout);
+router.post('/logout-all', verifyToken, logoutAll);
 router.get('/me', verifyToken, getMe);
+
+// Token refresh — rate-limited to prevent abuse
+router.post(
+  '/refresh',
+  rateLimit({ windowMs: 15 * 60 * 1000, max: 30, message: { success: false, message: 'Too many refresh attempts.' } }),
+  body('refreshToken').notEmpty().withMessage('refreshToken is required'),
+  refresh
+);
 
 // Google OAuth (guarded — returns 503 if not configured)
 router.get(
