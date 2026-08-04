@@ -3,7 +3,7 @@ const Redis = require('ioredis');
 const redis = new Redis(process.env.REDIS_URL || 'redis://localhost:6379', {
   maxRetriesPerRequest: 3,
   enableReadyCheck: true,
-  lazyConnect: true,
+  lazyConnect: true, // connect() is called explicitly in server.js startup sequence
 });
 
 redis.on('connect', () => console.log('✅ Redis connected'));
