@@ -11,6 +11,7 @@ const { success, error } = require('../utils/apiResponse');
 const getListings = async (req, res, next) => {
   try {
     const {
+      city,
       area,
       type,
       gender,
@@ -28,6 +29,7 @@ const getListings = async (req, res, next) => {
     // Build filter — always only show active listings
     const filter = { status: 'active' };
 
+    if (city) filter['address.city'] = { $regex: city, $options: 'i' };
     if (area) filter['address.area'] = { $regex: area, $options: 'i' };
     if (type) filter.type = type;
     if (gender) filter.gender = gender;
@@ -90,7 +92,7 @@ const getListings = async (req, res, next) => {
     if (req.user) {
       const searchEntry = {
         query: q || '',
-        filters: { area, type, gender, minRent, maxRent, amenities, sharing, verified },
+        filters: { city, area, type, gender, minRent, maxRent, amenities, sharing, verified },
         searchedAt: new Date(),
       };
 
