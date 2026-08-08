@@ -231,7 +231,7 @@ const updateListing = async (req, res, next) => {
 // ─── DELETE /api/listings/:id ─────────────────────────────────────────────────
 /**
  * Soft delete — sets status to 'deleted'.
- * Also cleans up S3 photos (batch delete).
+ * Also cleans up R2 photos (batch delete).
  */
 const deleteListing = async (req, res, next) => {
   try {
@@ -246,22 +246,22 @@ const deleteListing = async (req, res, next) => {
       return error(res, { message: 'Access denied. You do not own this listing.', statusCode: 403 });
     }
 
-    // Batch delete S3 photos if any
+    // Batch delete R2 photos if any
     if (listing.photos && listing.photos.length > 0) {
       try {
         const { DeleteObjectsCommand } = require('@aws-sdk/client-s3');
-        const s3Client = require('../config/s3');
+        const r2Client = require('../config/r2');
 
         const objects = listing.photos.map((p) => ({ Key: p.key }));
-        await s3Client.send(
+        await r2Client.send(
           new DeleteObjectsCommand({
-            Bucket: process.env.AWS_S3_BUCKET_NAME,
+            Bucket: process.env.R2_BUCKET_NAME,
             Delete: { Objects: objects },
           })
         );
-      } catch (s3Err) {
-        console.error('S3 batch delete error (non-fatal):', s3Err.message);
-        // Continue with soft-delete even if S3 cleanup fails
+      } catch (r2Err) {
+        console.error('R2 batch delete error (non-fatal):', r2Err.message);
+        // Continue with soft-delete even if R2 cleanup fails
       }
     }
 
@@ -304,7 +304,7 @@ const getWhatsAppLink = async (req, res, next) => {
 
 // ─── POST /api/listings/:id/photos ───────────────────────────────────────────
 /**
- * Upload photos to S3 — handled after upload middleware runs.
+ * Upload photos to R2 — handled after upload middleware runs.
  * Middleware attaches req.uploadedPhotos = [{url, key}]
  */
 const uploadPhotos = async (req, res, next) => {
@@ -336,7 +336,7 @@ const uploadPhotos = async (req, res, next) => {
 
 // ─── DELETE /api/listings/:id/photos/:photoKey ────────────────────────────────
 /**
- * Delete a specific photo by its S3 key.
+ * Delete a specific photo by its R2 key.
  */
 const deletePhoto = async (req, res, next) => {
   try {
@@ -352,13 +352,13 @@ const deletePhoto = async (req, res, next) => {
       return error(res, { message: 'Photo not found in this listing.', statusCode: 404 });
     }
 
-    // Delete from S3
+    // Delete from R2
     const { DeleteObjectCommand } = require('@aws-sdk/client-s3');
-    const s3Client = require('../config/s3');
+    const r2Client = require('../config/r2');
 
-    await s3Client.send(
+    await r2Client.send(
       new DeleteObjectCommand({
-        Bucket: process.env.AWS_S3_BUCKET_NAME,
+        Bucket: process.env.R2_BUCKET_NAME,
         Key: photoKey,
       })
     );
