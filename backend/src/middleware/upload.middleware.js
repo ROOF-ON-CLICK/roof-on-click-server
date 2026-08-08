@@ -1,10 +1,10 @@
 const multer = require('multer');
 const { PutObjectCommand } = require('@aws-sdk/client-s3');
-const s3Client = require('../config/s3');
+const r2Client = require('../config/r2');
 const { error } = require('../utils/apiResponse');
 
 // ─── Multer Configuration ─────────────────────────────────────────────────────
-// Use memoryStorage — files are held in Buffer, then piped to S3
+// Use memoryStorage — files are held in Buffer, then piped to R2
 const storage = multer.memoryStorage();
 
 const fileFilter = (req, file, cb) => {
@@ -25,32 +25,34 @@ const multerUpload = multer({
   },
 });
 
-// ─── S3 Upload Helper ─────────────────────────────────────────────────────────
-const uploadFileToS3 = async (file, listingId) => {
+// ─── R2 Upload Helper ─────────────────────────────────────────────────────────
+const uploadFileToR2 = async (file, listingId) => {
   const timestamp = Date.now();
   const sanitizedName = file.originalname.replace(/\s+/g, '-').replace(/[^a-zA-Z0-9._-]/g, '');
   const key = `listings/${listingId}/${timestamp}-${sanitizedName}`;
 
-  await s3Client.send(
+  await r2Client.send(
     new PutObjectCommand({
-      Bucket: process.env.AWS_S3_BUCKET_NAME,
+      Bucket: process.env.R2_BUCKET_NAME,
       Key: key,
       Body: file.buffer,
       ContentType: file.mimetype,
     })
   );
 
-  const url = `https://${process.env.AWS_S3_BUCKET_NAME}.s3.${process.env.AWS_REGION}.amazonaws.com/${key}`;
+  // Use the R2 public URL if a custom domain is set, otherwise fall back to the dev URL
+  const baseUrl = process.env.R2_PUBLIC_URL;
+  const url = `${baseUrl}/${key}`;
 
   return { url, key };
 };
 
 // ─── Composed Middleware ───────────────────────────────────────────────────────
 /**
- * uploadToS3 — multer processes multipart/form-data, then uploads each file to S3.
+ * uploadToR2 — multer processes multipart/form-data, then uploads each file to R2.
  * Sets req.uploadedPhotos = [{ url, key }, ...]
  */
-const uploadToS3 = [
+const uploadToR2 = [
   multerUpload.array('photos', 10),
 
   async (req, res, next) => {
@@ -62,7 +64,7 @@ const uploadToS3 = [
 
     try {
       const uploadResults = await Promise.all(
-        req.files.map((file) => uploadFileToS3(file, listingId))
+        req.files.map((file) => uploadFileToR2(file, listingId))
       );
       req.uploadedPhotos = uploadResults;
       next();
@@ -72,4 +74,4 @@ const uploadToS3 = [
   },
 ];
 
-module.exports = { uploadToS3 };
+module.exports = { uploadToR2 };

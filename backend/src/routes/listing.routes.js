@@ -13,7 +13,7 @@ const {
 } = require('../controllers/listing.controller');
 
 const { verifyToken, optionalAuth, requireRole, isOwnerOf } = require('../middleware/auth.middleware');
-const { uploadToS3 } = require('../middleware/upload.middleware');
+const { uploadToR2 } = require('../middleware/upload.middleware');
 const Listing = require('../models/Listing.model');
 
 const router = express.Router();
@@ -61,7 +61,7 @@ router.post(
   '/:id/photos',
   verifyToken,
   isOwnerOf(Listing),
-  uploadToS3,        // multer + S3 upload middleware → sets req.uploadedPhotos
+  uploadToR2,        // multer + R2 upload middleware → sets req.uploadedPhotos
   uploadPhotos
 );
 
