@@ -24,7 +24,7 @@ const submitEnquiry = async (req, res, next) => {
       return error(res, { message: 'Listing not found or no longer active.', statusCode: 404 });
     }
 
-    const { name, phone, message: msg } = req.body;
+    const { name, phone, message: msg, requestType, preferredDate, preferredTime, notes } = req.body;
 
     const enquiry = await Enquiry.create({
       listing: listing._id,
@@ -32,6 +32,10 @@ const submitEnquiry = async (req, res, next) => {
       name,
       phone,
       message: msg,
+      requestType: requestType || 'Enquiry',
+      preferredDate: preferredDate || null,
+      preferredTime: preferredTime || null,
+      notes: notes || null,
     });
 
     return success(res, {

@@ -15,7 +15,7 @@ const listingSchema = new mongoose.Schema(
     },
     type: {
       type: String,
-      enum: ['hostel', 'pg', 'shared-room', 'private-room'],
+      enum: ['hostel', 'pg', 'shared-room', 'private-room', 'apartment', 'studio', '1-bhk', '2-bhk', '3-bhk', '4-bhk'],
       required: [true, 'Listing type is required'],
     },
     gender: {
@@ -30,6 +30,7 @@ const listingSchema = new mongoose.Schema(
 
     // ─── Location ──────────────────────────────────────────────────────────
     address: {
+      full: { type: String, trim: true },
       street: { type: String, trim: true },
       area: {
         type: String,
@@ -42,11 +43,12 @@ const listingSchema = new mongoose.Schema(
         trim: true,
       },
       pincode: { type: String, trim: true },
+      landmark: { type: String, trim: true },
+      mapsLink: { type: String, trim: true },
       coordinates: {
         type: {
           type: String,
           enum: ['Point'],
-          default: 'Point',
         },
         coordinates: {
           type: [Number], // [longitude, latitude]
@@ -67,6 +69,10 @@ const listingSchema = new mongoose.Schema(
         default: 0,
         min: [0, 'Deposit cannot be negative'],
       },
+      maintenance: {
+        type: Number,
+        default: 0,
+      },
       foodIncluded: {
         type: Boolean,
         default: false,
@@ -78,9 +84,48 @@ const listingSchema = new mongoose.Schema(
       type: [String],
       default: [],
     },
+    nearby: {
+      type: [String],
+      default: [],
+    },
     sharingOptions: {
       type: [Number], // e.g. [1, 2, 3] for single, double, triple
       default: [],
+    },
+    rooms: [
+      {
+        id: { type: String },
+        roomType: { type: String },
+        sharingType: { type: String },
+        monthlyRent: { type: Number },
+        securityDeposit: { type: Number },
+        totalRooms: { type: Number },
+        availableRooms: { type: Number },
+        attachedBathroom: { type: Boolean, default: true },
+        furnished: { type: String, default: 'Fully Furnished' },
+      },
+    ],
+    rules: {
+      smokingAllowed: { type: Boolean, default: false },
+      drinkingAllowed: { type: Boolean, default: false },
+      visitorsAllowed: { type: Boolean, default: true },
+      petsAllowed: { type: Boolean, default: false },
+      loudMusicAllowed: { type: Boolean, default: false },
+      gateClosingEnabled: { type: Boolean, default: true },
+      gateClosingTime: { type: String, default: '10:00 PM' },
+    },
+    apartmentDetails: {
+      bedrooms: { type: String },
+      furnished: { type: String },
+      kitchenType: { type: String },
+      bathroomType: { type: String },
+      balcony: { type: Boolean },
+      parking: { type: String },
+      floorNumber: { type: Number },
+      totalFloors: { type: Number },
+      liftAvailable: { type: Boolean },
+      powerBackup: { type: Boolean },
+      security: { type: Boolean },
     },
     availableFrom: {
       type: Date,
@@ -104,6 +149,10 @@ const listingSchema = new mongoose.Schema(
         key: { type: String, required: true },  // S3 object key for deletion
       },
     ],
+    video: {
+      url: { type: String },
+      name: { type: String },
+    },
 
     // ─── Contact ───────────────────────────────────────────────────────────
     ownerWhatsapp: {

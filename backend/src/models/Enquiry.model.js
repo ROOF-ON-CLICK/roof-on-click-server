@@ -27,9 +27,26 @@ const enquirySchema = new mongoose.Schema(
       trim: true,
       maxlength: [500, 'Message cannot exceed 500 characters'],
     },
+    requestType: {
+      type: String,
+      enum: ['Visit', 'Enquiry'],
+      default: 'Enquiry',
+    },
+    preferredDate: {
+      type: String,
+      default: null,
+    },
+    preferredTime: {
+      type: String,
+      default: null,
+    },
+    notes: {
+      type: String,
+      default: null,
+    },
     status: {
       type: String,
-      enum: ['new', 'seen', 'closed'],
+      enum: ['new', 'seen', 'closed', 'Pending', 'Approved', 'Rejected', 'Rescheduled'],
       default: 'new',
     },
   },
