@@ -74,4 +74,64 @@ const uploadToR2 = [
   },
 ];
 
-module.exports = { uploadToR2 };
+// ─── Single File R2 Upload Middleware ─────────────────────────────────────────
+const singleMulterUpload = multer({
+  storage,
+  fileFilter,
+  limits: {
+    fileSize: 5 * 1024 * 1024, // 5MB limit
+  },
+}).single('image');
+
+/**
+ * uploadSingleToR2 — handles single 'image' field upload with file size & format validation.
+ * Sets req.uploadedImage = { url, key, name, size }
+ */
+const uploadSingleToR2 = (req, res, next) => {
+  singleMulterUpload(req, res, async (err) => {
+    if (err instanceof multer.MulterError) {
+      if (err.code === 'LIMIT_FILE_SIZE') {
+        return error(res, { message: 'File size exceeds 5MB limit.', statusCode: 400 });
+      }
+      return error(res, { message: err.message, statusCode: 400 });
+    } else if (err) {
+      return error(res, { message: err.message || 'Invalid image file.', statusCode: 400 });
+    }
+
+    if (!req.file) {
+      return error(res, { message: 'No image file provided.', statusCode: 400 });
+    }
+
+    try {
+      const folder = req.query.folder || 'listings';
+      const userId = req.user ? req.user._id : 'public';
+      const timestamp = Date.now();
+      const sanitizedName = req.file.originalname.replace(/\s+/g, '-').replace(/[^a-zA-Z0-9._-]/g, '') || 'image.jpg';
+      const key = `uploads/${folder}/${userId}/${timestamp}-${sanitizedName}`;
+
+      await r2Client.send(
+        new PutObjectCommand({
+          Bucket: process.env.R2_BUCKET_NAME,
+          Key: key,
+          Body: req.file.buffer,
+          ContentType: req.file.mimetype,
+        })
+      );
+
+      const baseUrl = process.env.R2_PUBLIC_URL || 'https://pub-7dc0dca4b7ab458d8e817e31f5d6b1e1.r2.dev';
+      const url = `${baseUrl}/${key}`;
+
+      req.uploadedImage = {
+        url,
+        key,
+        name: req.file.originalname,
+        size: req.file.size,
+      };
+      next();
+    } catch (r2Err) {
+      next(r2Err);
+    }
+  });
+};
+
+module.exports = { uploadToR2, uploadSingleToR2 };

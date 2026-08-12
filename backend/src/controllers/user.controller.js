@@ -12,6 +12,8 @@ const getProfile = async (req, res, next) => {
   }
 };
 
+const { uploadBase64ToR2 } = require('../utils/r2Upload');
+
 // ─── PUT /api/users/profile ───────────────────────────────────────────────────
 const updateProfile = async (req, res, next) => {
   try {
@@ -20,7 +22,13 @@ const updateProfile = async (req, res, next) => {
     const updates = {};
     if (name !== undefined) updates.name = name;
     if (phone !== undefined) updates.phone = phone;
-    if (avatar !== undefined) updates.avatar = avatar;
+    if (avatar !== undefined) {
+      if (avatar && avatar.startsWith('data:image/')) {
+        updates.avatar = await uploadBase64ToR2(avatar, `avatars/${req.user._id}`);
+      } else {
+        updates.avatar = avatar;
+      }
+    }
 
     const user = await User.findByIdAndUpdate(
       req.user._id,
