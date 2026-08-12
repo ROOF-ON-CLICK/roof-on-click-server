@@ -14,6 +14,7 @@ const enquiryRoutes = require('./routes/enquiry.routes');
 const adminRoutes = require('./routes/admin.routes');
 const bookingRoutes = require('./routes/booking.routes');
 const reviewRoutes = require('./routes/review.routes');
+const uploadRoutes = require('./routes/upload.routes');
 
 // Middleware imports
 const errorHandler = require('./middleware/errorHandler.middleware');
@@ -73,6 +74,7 @@ app.use('/api/enquiries', enquiryRoutes);
 app.use('/api/admin', adminRoutes);
 app.use('/api/bookings', bookingRoutes);
 app.use('/api/reviews', reviewRoutes);
+app.use('/api/upload', uploadRoutes);
 
 // ─── 404 Handler ──────────────────────────────────────────────────────────────
 app.use((req, res) => {

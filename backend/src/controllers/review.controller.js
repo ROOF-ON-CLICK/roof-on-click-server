@@ -14,6 +14,8 @@ const getPropertyReviews = async (req, res, next) => {
   }
 };
 
+const { uploadBase64ToR2 } = require('../utils/r2Upload');
+
 // ─── POST /api/reviews/:propertyId ───────────────────────────────────────────
 const createReview = async (req, res, next) => {
   try {
@@ -24,6 +26,10 @@ const createReview = async (req, res, next) => {
     if (!listing) {
       return error(res, { message: 'Property not found.', statusCode: 404 });
     }
+
+    const uploadedImages = await Promise.all(
+      (images || []).map((img) => uploadBase64ToR2(img, `reviews/${propertyId}`))
+    );
 
     const review = await Review.create({
       property: listing._id,
@@ -43,7 +49,7 @@ const createReview = async (req, res, next) => {
         management: 5,
         overall: rating || 5,
       },
-      images: images || [],
+      images: uploadedImages,
     });
 
     return success(res, { message: 'Review posted successfully.', data: { review }, statusCode: 201 });
