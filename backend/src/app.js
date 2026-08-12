@@ -12,6 +12,8 @@ const listingRoutes = require('./routes/listing.routes');
 const userRoutes = require('./routes/user.routes');
 const enquiryRoutes = require('./routes/enquiry.routes');
 const adminRoutes = require('./routes/admin.routes');
+const bookingRoutes = require('./routes/booking.routes');
+const reviewRoutes = require('./routes/review.routes');
 
 // Middleware imports
 const errorHandler = require('./middleware/errorHandler.middleware');
@@ -69,6 +71,8 @@ app.use('/api/listings', listingRoutes);
 app.use('/api/users', userRoutes);
 app.use('/api/enquiries', enquiryRoutes);
 app.use('/api/admin', adminRoutes);
+app.use('/api/bookings', bookingRoutes);
+app.use('/api/reviews', reviewRoutes);
 
 // ─── 404 Handler ──────────────────────────────────────────────────────────────
 app.use((req, res) => {
