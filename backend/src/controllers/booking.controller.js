@@ -6,6 +6,10 @@ const { success, error } = require('../utils/apiResponse');
 // ─── POST /api/bookings ───────────────────────────────────────────────────────
 const createBooking = async (req, res, next) => {
   try {
+    if (req.user && req.user.role === 'admin') {
+      return error(res, { message: 'Admins are platform overseers and cannot place tenant bookings.', statusCode: 403 });
+    }
+
     const { propertyId, propertyName, roomType, moveInDate, guestDetails, pricing } = req.body;
 
     if (!propertyId || !pricing) {
@@ -33,11 +37,11 @@ const createBooking = async (req, res, next) => {
         platformFee: pricing.platformFee || 0,
         totalDueNow: pricing.totalDueNow || (pricing.monthlyRent + (pricing.securityDeposit || 0)),
       },
-      status: 'confirmed',
+      status: 'pending',
     });
 
     return success(res, {
-      message: 'Booking reservation confirmed.',
+      message: 'Booking reservation submitted and pending owner confirmation.',
       data: { booking },
       statusCode: 201,
     });
@@ -76,6 +80,35 @@ const getOwnerBookings = async (req, res, next) => {
   }
 };
 
+// ─── PUT /api/bookings/:id/status ────────────────────────────────────────────
+const updateBookingStatus = async (req, res, next) => {
+  try {
+    const { status } = req.body;
+    if (!['pending', 'confirmed', 'rejected', 'cancelled', 'completed'].includes(status)) {
+      return error(res, { message: 'Invalid status value.', statusCode: 400 });
+    }
+
+    const booking = await Booking.findById(req.params.id).populate('property', 'owner');
+    if (!booking) {
+      return error(res, { message: 'Booking not found.', statusCode: 404 });
+    }
+
+    if (
+      req.user.role !== 'admin' &&
+      booking.property?.owner?.toString() !== req.user._id.toString()
+    ) {
+      return error(res, { message: 'Access denied.', statusCode: 403 });
+    }
+
+    booking.status = status;
+    await booking.save();
+
+    return success(res, { message: `Booking status updated to ${status}.`, data: { booking } });
+  } catch (err) {
+    next(err);
+  }
+};
+
 // ─── PUT /api/bookings/:id/cancel ────────────────────────────────────────────
 const cancelBooking = async (req, res, next) => {
   try {
@@ -97,4 +130,4 @@ const cancelBooking = async (req, res, next) => {
   }
 };
 
-module.exports = { createBooking, getUserBookings, getOwnerBookings, cancelBooking };
+module.exports = { createBooking, getUserBookings, getOwnerBookings, updateBookingStatus, cancelBooking };

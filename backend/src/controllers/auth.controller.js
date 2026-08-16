@@ -96,7 +96,7 @@ const register = async (req, res, next) => {
 
     const existing = await User.findOne({ email: email.toLowerCase() });
     if (existing) {
-      return error(res, { message: 'An account with this email already exists.', statusCode: 409 });
+      return error(res, { message: 'An account with this email already exists. Please log in.', statusCode: 409 });
     }
 
     const hashedPassword = await bcrypt.hash(password, 12);

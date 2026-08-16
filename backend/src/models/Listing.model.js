@@ -149,10 +149,6 @@ const listingSchema = new mongoose.Schema(
         key: { type: String, required: true },  // S3 object key for deletion
       },
     ],
-    video: {
-      url: { type: String },
-      name: { type: String },
-    },
 
     // ─── Contact ───────────────────────────────────────────────────────────
     ownerWhatsapp: {
@@ -163,8 +159,8 @@ const listingSchema = new mongoose.Schema(
     // ─── Status & Verification ─────────────────────────────────────────────
     status: {
       type: String,
-      enum: ['active', 'inactive', 'deleted'],
-      default: 'active',
+      enum: ['pending', 'active', 'inactive', 'rejected', 'deleted'],
+      default: 'pending',
     },
     isVerified: {
       type: Boolean,

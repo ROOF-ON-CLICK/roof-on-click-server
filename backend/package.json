@@ -5,7 +5,9 @@
   "main": "server.js",
   "scripts": {
     "start": "node server.js",
-    "dev": "nodemon server.js"
+    "dev": "nodemon server.js",
+    "migrate:unpublish-listings": "node src/migrations/unpublish-all-listings.js",
+    "create-admin": "node src/scripts/create-admin.js"
   },
   "dependencies": {
     "@aws-sdk/client-s3": "^3.600.0",
