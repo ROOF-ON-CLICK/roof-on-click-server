@@ -41,7 +41,7 @@ router.get('/:id', optionalAuth, getListing);
 router.get('/:id/whatsapp-link', getWhatsAppLink);
 
 // ─── Protected Routes — Owner or Admin ───────────────────────────────────────
-router.post('/', verifyToken, listingValidation, createListing);
+router.post('/', verifyToken, requireRole('owner'), listingValidation, createListing);
 
 router.put(
   '/:id',

@@ -185,10 +185,12 @@ const createListing = async (req, res, next) => {
     const listing = await Listing.create({
       ...req.body,
       owner: req.user._id,
+      status: 'pending',
+      isVerified: false,
     });
 
     return success(res, {
-      message: 'Listing created successfully.',
+      message: 'Property submitted for admin examination & site verification.',
       data: { listing },
       statusCode: 201,
     });

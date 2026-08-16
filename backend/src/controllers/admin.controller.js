@@ -1,6 +1,63 @@
 const Listing = require('../models/Listing.model');
 const User = require('../models/User.model');
+const Booking = require('../models/Booking.model');
+const Review = require('../models/Review.model');
 const { success, error } = require('../utils/apiResponse');
+
+// ─── GET /api/admin/stats ─────────────────────────────────────────────────────
+/**
+ * Summary KPIs and dashboard counters for Admin Overview.
+ */
+const getDashboardStats = async (req, res, next) => {
+  try {
+    const [
+      totalProperties,
+      pendingProperties,
+      activeProperties,
+      rejectedProperties,
+      totalUsers,
+      totalOwners,
+      totalSeekers,
+      totalBookings,
+      pendingBookings,
+      totalReviews,
+      recentProperties,
+    ] = await Promise.all([
+      Listing.countDocuments(),
+      Listing.countDocuments({ status: 'pending' }),
+      Listing.countDocuments({ status: 'active' }),
+      Listing.countDocuments({ status: 'rejected' }),
+      User.countDocuments(),
+      User.countDocuments({ role: 'owner' }),
+      User.countDocuments({ role: 'seeker' }),
+      Booking.countDocuments(),
+      Booking.countDocuments({ status: 'pending' }),
+      Review.countDocuments(),
+      Listing.find().sort({ createdAt: -1 }).limit(5).populate('owner', 'name email phone').lean(),
+    ]);
+
+    return success(res, {
+      message: 'Admin stats fetched successfully.',
+      data: {
+        kpis: {
+          totalProperties,
+          pendingProperties,
+          activeProperties,
+          rejectedProperties,
+          totalUsers,
+          totalOwners,
+          totalSeekers,
+          totalBookings,
+          pendingBookings,
+          totalReviews,
+        },
+        recentProperties,
+      },
+    });
+  } catch (err) {
+    next(err);
+  }
+};
 
 // ─── GET /api/admin/listings ──────────────────────────────────────────────────
 /**
@@ -72,13 +129,23 @@ const verifyListing = async (req, res, next) => {
 const setListingStatus = async (req, res, next) => {
   try {
     const { status } = req.body;
-    if (!['active', 'inactive', 'deleted'].includes(status)) {
-      return error(res, { message: 'Invalid status.', statusCode: 400 });
+    const allowedStatuses = ['pending', 'active', 'inactive', 'rejected', 'deleted'];
+    if (!allowedStatuses.includes(status)) {
+      return error(res, { message: `Invalid status. Must be one of: ${allowedStatuses.join(', ')}`, statusCode: 400 });
+    }
+
+    const updateFields = { status };
+    if (status === 'active') {
+      updateFields.isVerified = true;
+      updateFields.verifiedAt = new Date();
+      updateFields.verifiedBy = req.user._id;
+    } else if (status === 'rejected') {
+      updateFields.isVerified = false;
     }
 
     const listing = await Listing.findByIdAndUpdate(
       req.params.id,
-      { $set: { status } },
+      { $set: updateFields },
       { new: true }
     );
 
@@ -86,7 +153,7 @@ const setListingStatus = async (req, res, next) => {
       return error(res, { message: 'Listing not found.', statusCode: 404 });
     }
 
-    return success(res, { message: `Listing status set to '${status}'.`, data: { listing } });
+    return success(res, { message: `Listing status updated to '${status}'.`, data: { listing } });
   } catch (err) {
     next(err);
   }
@@ -165,4 +232,125 @@ const setUserRole = async (req, res, next) => {
   }
 };
 
-module.exports = { getAllListings, verifyListing, setListingStatus, getAllUsers, setUserRole };
+// ─── GET /api/admin/bookings ──────────────────────────────────────────────────
+/**
+ * Fetch all platform bookings for Admin management.
+ */
+const getAllBookings = async (req, res, next) => {
+  try {
+    const { status, page = 1, limit = 20 } = req.query;
+    const filter = {};
+    if (status) filter.status = status;
+
+    const pageNum = Math.max(1, Number(page));
+    const limitNum = Math.min(100, Number(limit));
+    const skip = (pageNum - 1) * limitNum;
+
+    const [bookings, total] = await Promise.all([
+      Booking.find(filter)
+        .sort({ createdAt: -1 })
+        .skip(skip)
+        .limit(limitNum)
+        .populate('property', 'title address images rent owner')
+        .populate('user', 'name email phone')
+        .lean(),
+      Booking.countDocuments(filter),
+    ]);
+
+    return success(res, {
+      message: 'Admin: Bookings fetched successfully.',
+      data: { bookings },
+      pagination: { total, page: pageNum, limit: limitNum, totalPages: Math.ceil(total / limitNum) },
+    });
+  } catch (err) {
+    next(err);
+  }
+};
+
+// ─── PUT /api/admin/bookings/:id/status ───────────────────────────────────────
+/**
+ * Admin update booking status.
+ */
+const updateAdminBookingStatus = async (req, res, next) => {
+  try {
+    const { status } = req.body;
+    if (!['pending', 'confirmed', 'rejected', 'cancelled', 'completed'].includes(status)) {
+      return error(res, { message: 'Invalid booking status.', statusCode: 400 });
+    }
+
+    const booking = await Booking.findByIdAndUpdate(
+      req.params.id,
+      { $set: { status } },
+      { new: true }
+    );
+
+    if (!booking) {
+      return error(res, { message: 'Booking not found.', statusCode: 404 });
+    }
+
+    return success(res, { message: `Booking status updated to '${status}'.`, data: { booking } });
+  } catch (err) {
+    next(err);
+  }
+};
+
+// ─── GET /api/admin/reviews ───────────────────────────────────────────────────
+/**
+ * Fetch all property reviews for Admin moderation.
+ */
+const getAllReviews = async (req, res, next) => {
+  try {
+    const { page = 1, limit = 20 } = req.query;
+    const pageNum = Math.max(1, Number(page));
+    const limitNum = Math.min(100, Number(limit));
+    const skip = (pageNum - 1) * limitNum;
+
+    const [reviews, total] = await Promise.all([
+      Review.find()
+        .sort({ createdAt: -1 })
+        .skip(skip)
+        .limit(limitNum)
+        .populate('property', 'title address')
+        .populate('user', 'name email avatar')
+        .lean(),
+      Review.countDocuments(),
+    ]);
+
+    return success(res, {
+      message: 'Admin: Reviews fetched successfully.',
+      data: { reviews },
+      pagination: { total, page: pageNum, limit: limitNum, totalPages: Math.ceil(total / limitNum) },
+    });
+  } catch (err) {
+    next(err);
+  }
+};
+
+// ─── DELETE /api/admin/reviews/:id ────────────────────────────────────────────
+/**
+ * Delete a review (Admin moderation).
+ */
+const deleteAdminReview = async (req, res, next) => {
+  try {
+    const review = await Review.findByIdAndDelete(req.params.id);
+    if (!review) {
+      return error(res, { message: 'Review not found.', statusCode: 404 });
+    }
+    return success(res, { message: 'Review deleted successfully.' });
+  } catch (err) {
+    next(err);
+  }
+};
+
+module.exports = {
+  getDashboardStats,
+  getAllListings,
+  verifyListing,
+  setListingStatus,
+  getAllUsers,
+  setUserRole,
+  getAllBookings,
+  updateAdminBookingStatus,
+  getAllReviews,
+  deleteAdminReview,
+};
