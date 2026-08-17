@@ -2,9 +2,13 @@
 
 /**
  * email.service.js
- * Centralized email delivery via Resend SDK.
- * Lazy-initialises the Resend client so the server starts even without
- * RESEND_API_KEY — the error is surfaced only when an email is actually sent.
+ * Centralized high-deliverability transactional email delivery via Resend SDK.
+ * 
+ * Anti-Spam & Deliverability Features:
+ * 1. True Multipart delivery (both responsive HTML and clean plain-text fallback).
+ * 2. Proper List-Unsubscribe, X-Mailer, and transactional headers.
+ * 3. Responsive, table-based inline styling with dark/emerald theme.
+ * 4. Lazy-initialization & fail-safe execution (does not crash server if key is unset).
  */
 
 const { Resend } = require('resend');
@@ -15,71 +19,158 @@ const FROM_EMAIL =
 const FRONTEND_URL =
   process.env.FRONTEND_URL || 'http://localhost:3000';
 
-/** Returns a configured Resend client, or throws a clear error if key is missing. */
+/**
+ * Returns a configured Resend client instance, or null if API key is missing.
+ */
 function getResendClient() {
   const apiKey = process.env.RESEND_API_KEY;
   if (!apiKey) {
-    throw new Error(
-      '[email.service] RESEND_API_KEY is not set. ' +
-      'Add it to your .env file to enable password-reset emails.'
+    console.warn(
+      '[email.service] RESEND_API_KEY is not set. Emails will be logged to console in dev mode.'
     );
+    return null;
   }
   return new Resend(apiKey);
 }
 
-function buildPasswordResetEmail(name, resetUrl) {
+/**
+ * Clean plain-text fallback generator for anti-spam multipart compliance.
+ */
+function buildPlainTextEmail({ name, title, message, details = [], actionUrl, actionText }) {
+  let text = `RoofOnClick — Student & Professional Housing\n\n`;
+  if (name) text += `Hi ${name},\n\n`;
+  if (title) text += `${title}\n\n`;
+  if (message) text += `${message}\n\n`;
+
+  if (details && details.length > 0) {
+    text += `Details:\n`;
+    details.forEach(({ label, value }) => {
+      text += `• ${label}: ${value}\n`;
+    });
+    text += `\n`;
+  }
+
+  if (actionUrl) {
+    const fullUrl = actionUrl.startsWith('http') ? actionUrl : `${FRONTEND_URL}${actionUrl}`;
+    text += `${actionText || 'View Details'}: ${fullUrl}\n\n`;
+  }
+
+  text += `—\nRoofOnClick Team · Indore, India\nTo manage notification preferences, visit ${FRONTEND_URL}/profile/notifications`;
+  return text;
+}
+
+/**
+ * Core responsive, dark-mode branded HTML email builder.
+ */
+function buildBrandedEmailTemplate({
+  badge = 'Notification',
+  title,
+  recipientName,
+  message,
+  details = [],
+  actionUrl = null,
+  actionText = 'View in App',
+  footerNote = null,
+}) {
+  const fullActionUrl = actionUrl
+    ? (actionUrl.startsWith('http') ? actionUrl : `${FRONTEND_URL}${actionUrl}`)
+    : null;
+
+  // Build details table rows if provided
+  let detailsHtml = '';
+  if (details && details.length > 0) {
+    const rows = details
+      .map(
+        (d) => `
+        <tr>
+          <td style="padding:8px 0;color:#94a3b8;font-size:13px;font-weight:500;border-bottom:1px solid #1e293b;">${d.label}</td>
+          <td style="padding:8px 0;color:#f1f5f9;font-size:13px;font-weight:600;text-align:right;border-bottom:1px solid #1e293b;">${d.value}</td>
+        </tr>`
+      )
+      .join('');
+
+    detailsHtml = `
+      <table width="100%" cellpadding="0" cellspacing="0" style="margin:20px 0 24px;background:#111827;border-radius:10px;padding:16px 20px;border:1px solid #1e293b;">
+        ${rows}
+      </table>`;
+  }
+
+  // CTA button HTML
+  const actionButtonHtml = fullActionUrl
+    ? `
+      <table cellpadding="0" cellspacing="0" style="margin:28px 0 20px;">
+        <tr>
+          <td style="background:linear-gradient(135deg,#10b981,#059669);border-radius:10px;padding:0;">
+            <a href="${fullActionUrl}" target="_blank" rel="noopener noreferrer" style="display:inline-block;padding:13px 32px;color:#ffffff;font-size:14px;font-weight:700;text-decoration:none;letter-spacing:0.3px;">
+              ${actionText} &rarr;
+            </a>
+          </td>
+        </tr>
+      </table>`
+    : '';
+
   return `<!DOCTYPE html>
 <html lang="en">
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
-  <title>Reset Your Password - RoofOnClick</title>
+  <title>${title || 'RoofOnClick Notification'}</title>
 </head>
-<body style="margin:0;padding:0;background:#0f1117;font-family:'Segoe UI',Arial,sans-serif;">
-  <table width="100%" cellpadding="0" cellspacing="0" style="background:#0f1117;padding:40px 0;">
+<body style="margin:0;padding:0;background:#0b0f17;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Helvetica,Arial,sans-serif;-webkit-font-smoothing:antialiased;">
+  <table width="100%" cellpadding="0" cellspacing="0" style="background:#0b0f17;padding:32px 16px;">
     <tr><td align="center">
-      <table width="560" cellpadding="0" cellspacing="0"
-        style="background:#1a1d27;border-radius:16px;overflow:hidden;border:1px solid #2a2d3a;">
+      <table width="560" cellpadding="0" cellspacing="0" style="max-width:560px;width:100%;background:#131823;border-radius:16px;overflow:hidden;border:1px solid #1f293d;box-shadow:0 10px 25px rgba(0,0,0,0.4);">
+        
+        <!-- Header -->
         <tr>
-          <td style="background:linear-gradient(135deg,#10b981,#059669);padding:32px 40px;text-align:center;">
-            <h1 style="margin:0;color:#ffffff;font-size:24px;font-weight:800;">RoofOnClick</h1>
-            <p style="margin:6px 0 0;color:rgba(255,255,255,0.85);font-size:13px;">Your trusted student housing platform</p>
-          </td>
-        </tr>
-        <tr>
-          <td style="padding:40px;">
-            <h2 style="margin:0 0 12px;color:#f1f5f9;font-size:20px;font-weight:700;">Reset your password</h2>
-            <p style="margin:0 0 8px;color:#94a3b8;font-size:15px;line-height:1.6;">Hi <strong style="color:#e2e8f0;">${name}</strong>,</p>
-            <p style="margin:0 0 28px;color:#94a3b8;font-size:15px;line-height:1.6;">
-              We received a request to reset your RoofOnClick password.
-              Click the button below to set a new password. This link expires in
-              <strong style="color:#10b981;">15 minutes</strong>.
-            </p>
-            <table cellpadding="0" cellspacing="0" style="margin:0 auto 28px;">
+          <td style="background:linear-gradient(135deg,#059669,#10b981);padding:28px 36px;text-align:left;">
+            <table width="100%" cellpadding="0" cellspacing="0">
               <tr>
-                <td style="background:linear-gradient(135deg,#10b981,#059669);border-radius:10px;padding:0;">
-                  <a href="${resetUrl}" style="display:block;padding:14px 36px;color:#ffffff;font-size:15px;font-weight:700;text-decoration:none;">
-                    Reset Password &rarr;
-                  </a>
+                <td>
+                  <h1 style="margin:0;color:#ffffff;font-size:22px;font-weight:800;letter-spacing:-0.5px;">RoofOnClick</h1>
+                  <p style="margin:4px 0 0;color:rgba(255,255,255,0.9);font-size:12px;font-weight:500;">Student &amp; Professional Housing Platform</p>
+                </td>
+                <td align="right">
+                  <span style="display:inline-block;background:rgba(255,255,255,0.2);color:#ffffff;font-size:11px;font-weight:700;padding:4px 10px;border-radius:20px;text-transform:uppercase;letter-spacing:0.5px;">
+                    ${badge}
+                  </span>
                 </td>
               </tr>
             </table>
-            <p style="margin:0 0 8px;color:#64748b;font-size:12px;">If the button does not work, paste this link in your browser:</p>
-            <p style="margin:0 0 28px;word-break:break-all;">
-              <a href="${resetUrl}" style="color:#10b981;font-size:12px;">${resetUrl}</a>
-            </p>
-            <div style="background:#111827;border:1px solid #1e293b;border-radius:10px;padding:16px;">
-              <p style="margin:0;color:#64748b;font-size:12px;line-height:1.6;">
-                Did not request this? You can safely ignore this email. Your password will not change unless you click the link above.
-              </p>
-            </div>
           </td>
         </tr>
+
+        <!-- Main Body -->
         <tr>
-          <td style="padding:20px 40px;border-top:1px solid #2a2d3a;text-align:center;">
-            <p style="margin:0;color:#475569;font-size:11px;">&copy; 2025 RoofOnClick &middot; Indore, India</p>
+          <td style="padding:32px 36px 28px;">
+            ${recipientName ? `<p style="margin:0 0 12px;color:#cbd5e1;font-size:15px;line-height:1.5;">Hi <strong style="color:#ffffff;">${recipientName}</strong>,</p>` : ''}
+            
+            <h2 style="margin:0 0 14px;color:#f8fafc;font-size:18px;font-weight:700;line-height:1.4;">${title}</h2>
+            <p style="margin:0 0 16px;color:#94a3b8;font-size:14px;line-height:1.6;">${message}</p>
+
+            ${detailsHtml}
+            ${actionButtonHtml}
+
+            ${
+              footerNote
+                ? `<div style="background:#0f172a;border:1px solid #1e293b;border-radius:8px;padding:12px 16px;margin-top:20px;">
+                    <p style="margin:0;color:#64748b;font-size:12px;line-height:1.5;">${footerNote}</p>
+                   </div>`
+                : ''
+            }
           </td>
         </tr>
+
+        <!-- Footer (Anti-Spam compliance) -->
+        <tr>
+          <td style="padding:20px 36px;background:#0d121c;border-top:1px solid #1f293d;text-align:center;">
+            <p style="margin:0 0 6px;color:#475569;font-size:11px;">&copy; ${new Date().getFullYear()} RoofOnClick &middot; Indore, Madhya Pradesh, India</p>
+            <p style="margin:0;color:#475569;font-size:11px;">
+              You received this transactional notification regarding your RoofOnClick account.
+            </p>
+          </td>
+        </tr>
+
       </table>
     </td></tr>
   </table>
@@ -87,86 +178,266 @@ function buildPasswordResetEmail(name, resetUrl) {
 </html>`;
 }
 
-async function sendPasswordResetEmail(to, name, rawToken) {
+/**
+ * Universal transactional email sender with anti-spam headers and multipart payload.
+ */
+async function sendTransactionalEmail({
+  to,
+  name,
+  subject,
+  badge,
+  title,
+  message,
+  details = [],
+  actionUrl = null,
+  actionText = 'View in App',
+  footerNote = null,
+}) {
+  if (!to) return;
+
   const resend = getResendClient();
-  const resetUrl = `${FRONTEND_URL}/auth/reset-password?token=${rawToken}`;
-  await resend.emails.send({
-    from: FROM_EMAIL,
+  if (!resend) {
+    console.log(`[email.service] [DEV MOCK] Email to: ${to} | Subject: "${subject}" | Title: "${title}"`);
+    return;
+  }
+
+  const html = buildBrandedEmailTemplate({
+    badge,
+    title,
+    recipientName: name,
+    message,
+    details,
+    actionUrl,
+    actionText,
+    footerNote,
+  });
+
+  const text = buildPlainTextEmail({
+    name,
+    title,
+    message,
+    details,
+    actionUrl,
+    actionText,
+  });
+
+  try {
+    await resend.emails.send({
+      from: FROM_EMAIL,
+      to,
+      subject,
+      html,
+      text,
+      headers: {
+        'X-Mailer': 'RoofOnClick Notification Mailer v1.0',
+        'List-Unsubscribe': `<mailto:notifications@roofonclick.com?subject=unsubscribe>`,
+        'Precedence': 'bulk',
+      },
+    });
+  } catch (err) {
+    console.error(`[email.service] Failed to send email to ${to}:`, err.message);
+  }
+}
+
+/**
+ * Automatically format and dispatch an email based on a Notification event and recipient user.
+ */
+async function dispatchNotificationEmail(notification, recipientUser) {
+  if (!recipientUser?.email) return;
+
+  const { type, category, title, message, actionUrl, metadata = {} } = notification;
+  const name = recipientUser.name || 'Resident';
+  const to = recipientUser.email;
+
+  // Build metadata detail list for clean display
+  const details = [];
+  let subject = title;
+  let actionText = 'View in App';
+  let badge = category || 'Update';
+
+  switch (type) {
+    case 'booking.created':
+      subject = `[RoofOnClick] New Reservation Received - ${metadata.reservationId || 'Booking'}`;
+      badge = 'Booking';
+      actionText = 'Manage Booking';
+      if (metadata.reservationId) details.push({ label: 'Reservation ID', value: metadata.reservationId });
+      if (metadata.guestName) details.push({ label: 'Guest Name', value: metadata.guestName });
+      if (metadata.guestPhone) details.push({ label: 'Phone', value: metadata.guestPhone });
+      if (metadata.totalDueNow) details.push({ label: 'Total Due', value: `₹${metadata.totalDueNow}` });
+      break;
+
+    case 'booking.submitted':
+      subject = `[RoofOnClick] Reservation Submitted (${metadata.reservationId || 'Pending'})`;
+      badge = 'Booking';
+      actionText = 'View My Bookings';
+      if (metadata.reservationId) details.push({ label: 'Reservation ID', value: metadata.reservationId });
+      if (metadata.propertyName) details.push({ label: 'Property', value: metadata.propertyName });
+      break;
+
+    case 'booking.confirmed':
+    case 'booking.accepted':
+      subject = `[RoofOnClick] 🎉 Booking Confirmed (${metadata.reservationId || ''})`;
+      badge = 'Confirmed';
+      actionText = 'View Booking Details';
+      if (metadata.reservationId) details.push({ label: 'Reservation ID', value: metadata.reservationId });
+      break;
+
+    case 'booking.cancelled':
+      subject = `[RoofOnClick] Booking Cancelled (${metadata.reservationId || ''})`;
+      badge = 'Cancelled';
+      actionText = 'View Bookings';
+      if (metadata.reservationId) details.push({ label: 'Reservation ID', value: metadata.reservationId });
+      break;
+
+    case 'enquiry.created':
+      subject = `[RoofOnClick] New ${metadata.requestType || 'Enquiry'} Request`;
+      badge = metadata.requestType === 'Visit' ? 'Visit Request' : 'Enquiry';
+      actionText = 'Respond to Enquiry';
+      if (metadata.name) details.push({ label: 'Name', value: metadata.name });
+      if (metadata.phone) details.push({ label: 'Phone', value: metadata.phone });
+      if (metadata.preferredDate) details.push({ label: 'Date', value: new Date(metadata.preferredDate).toLocaleDateString() });
+      if (metadata.preferredTime) details.push({ label: 'Time Slot', value: metadata.preferredTime });
+      break;
+
+    case 'enquiry.submitted':
+      subject = `[RoofOnClick] Your ${metadata.requestType || 'Enquiry'} has been sent`;
+      badge = 'Enquiry Sent';
+      actionText = 'View My Enquiries';
+      break;
+
+    case 'property.submitted':
+      subject = `[RoofOnClick] Property Submitted for Verification`;
+      badge = 'Pending Review';
+      actionText = 'View Property Status';
+      if (metadata.title) details.push({ label: 'Property', value: metadata.title });
+      break;
+
+    case 'property.review_needed':
+      subject = `[RoofOnClick Admin] New Property Pending Review`;
+      badge = 'Admin Review';
+      actionText = 'Review Listing';
+      if (metadata.ownerName) details.push({ label: 'Owner', value: metadata.ownerName });
+      break;
+
+    case 'property.approved':
+      subject = `[RoofOnClick] 🎉 Your Property Listing has been Approved!`;
+      badge = 'Listing Live';
+      actionText = 'View My Properties';
+      break;
+
+    case 'property.rejected':
+      subject = `[RoofOnClick] Property Listing Rejected`;
+      badge = 'Rejected';
+      actionText = 'Review Listing Guidelines';
+      break;
+
+    case 'property.suspended':
+      subject = `[RoofOnClick] ⚠️ Property Listing Suspended`;
+      badge = 'Suspended';
+      actionText = 'View Property Status';
+      if (metadata.title) details.push({ label: 'Property', value: metadata.title });
+      break;
+
+    case 'property.deleted':
+      subject = `[RoofOnClick] Property Listing Removed`;
+      badge = 'Removed';
+      actionText = 'View Dashboard';
+      break;
+
+    default:
+      subject = `[RoofOnClick] ${title}`;
+      badge = category || 'Notification';
+      actionText = 'View Notification';
+      break;
+  }
+
+  await sendTransactionalEmail({
     to,
+    name,
+    subject,
+    badge,
+    title,
+    message,
+    details,
+    actionUrl,
+    actionText,
+  });
+}
+
+/**
+ * Send password reset email.
+ */
+async function sendPasswordResetEmail(to, name, rawToken) {
+  const resetUrl = `${FRONTEND_URL}/auth/reset-password?token=${rawToken}`;
+  await sendTransactionalEmail({
+    to,
+    name,
     subject: 'Reset your RoofOnClick password',
-    html: buildPasswordResetEmail(name, resetUrl),
-    // Plain-text fallback — required for good deliverability
-    text: `Hi ${name},\n\nWe received a request to reset your RoofOnClick password.\n\nClick the link below to set a new password (expires in 15 minutes):\n${resetUrl}\n\nIf you did not request this, you can safely ignore this email.\n\n— The RoofOnClick Team`,
-    headers: {
-      'X-Mailer': 'RoofOnClick Mailer',
-      'List-Unsubscribe': `<mailto:noreply@help.roofonclick.com?subject=unsubscribe>`,
-    },
+    badge: 'Security',
+    title: 'Reset your password',
+    message: 'We received a request to reset your RoofOnClick password. Click the button below to set a new password. This link expires in 15 minutes.',
+    actionUrl: resetUrl,
+    actionText: 'Reset Password',
+    footerNote: 'If you did not request a password reset, you can safely ignore this email. Your password will remain unchanged.',
   });
 }
 
 /**
  * Sent when a user who signed up via Google tries to reset their password.
- * Tells them to use Google Sign-In instead.
  */
 async function sendOAuthAccountEmail(to, name) {
-  const resend = getResendClient();
   const loginUrl = `${FRONTEND_URL}/login`;
-  const html = `<!DOCTYPE html>
-<html lang="en">
-<head><meta charset="UTF-8"/><title>Sign in with Google – RoofOnClick</title></head>
-<body style="margin:0;padding:0;background:#0f1117;font-family:'Segoe UI',Arial,sans-serif;">
-  <table width="100%" cellpadding="0" cellspacing="0" style="background:#0f1117;padding:40px 0;">
-    <tr><td align="center">
-      <table width="560" cellpadding="0" cellspacing="0"
-        style="background:#1a1d27;border-radius:16px;overflow:hidden;border:1px solid #2a2d3a;">
-        <tr>
-          <td style="background:linear-gradient(135deg,#10b981,#059669);padding:32px 40px;text-align:center;">
-            <h1 style="margin:0;color:#ffffff;font-size:24px;font-weight:800;">RoofOnClick</h1>
-            <p style="margin:6px 0 0;color:rgba(255,255,255,0.85);font-size:13px;">Your trusted student housing platform</p>
-          </td>
-        </tr>
-        <tr>
-          <td style="padding:40px;">
-            <h2 style="margin:0 0 12px;color:#f1f5f9;font-size:20px;font-weight:700;">You use Google to sign in</h2>
-            <p style="margin:0 0 8px;color:#94a3b8;font-size:15px;line-height:1.6;">Hi <strong style="color:#e2e8f0;">${name}</strong>,</p>
-            <p style="margin:0 0 28px;color:#94a3b8;font-size:15px;line-height:1.6;">
-              Your RoofOnClick account is linked to <strong style="color:#ffffff;">Google</strong>.
-              There is no separate password to reset &mdash; just click the button below and
-              sign in with your Google account as usual.
-            </p>
-            <table cellpadding="0" cellspacing="0" style="margin:0 auto 28px;">
-              <tr>
-                <td style="background:linear-gradient(135deg,#10b981,#059669);border-radius:10px;padding:0;">
-                  <a href="${loginUrl}" style="display:block;padding:14px 36px;color:#ffffff;font-size:15px;font-weight:700;text-decoration:none;">
-                    Sign in with Google &rarr;
-                  </a>
-                </td>
-              </tr>
-            </table>
-            <div style="background:#111827;border:1px solid #1e293b;border-radius:10px;padding:16px;">
-              <p style="margin:0;color:#64748b;font-size:12px;line-height:1.6;">
-                Did not request this? You can safely ignore this email.
-              </p>
-            </div>
-          </td>
-        </tr>
-        <tr>
-          <td style="padding:20px 40px;border-top:1px solid #2a2d3a;text-align:center;">
-            <p style="margin:0;color:#475569;font-size:11px;">&copy; 2025 RoofOnClick &middot; Indore, India</p>
-          </td>
-        </tr>
-      </table>
-    </td></tr>
-  </table>
-</body>
-</html>`;
-
-  await resend.emails.send({
-    from: FROM_EMAIL,
+  await sendTransactionalEmail({
     to,
+    name,
     subject: 'Your RoofOnClick account uses Google Sign-In',
-    html,
+    badge: 'Account Alert',
+    title: 'You use Google to sign in',
+    message: 'Your RoofOnClick account is linked to Google. There is no separate password to reset — click below to sign in with Google.',
+    actionUrl: loginUrl,
+    actionText: 'Sign in with Google',
+    footerNote: 'Did not request this? You can safely ignore this email.',
   });
 }
 
-module.exports = { sendPasswordResetEmail, sendOAuthAccountEmail };
+/**
+ * Send welcome email on account registration.
+ */
+async function sendWelcomeEmail(to, name, role = 'seeker') {
+  const isOwner = role === 'owner';
+  const subject = `Welcome to RoofOnClick, ${name || 'there'}! 🏠`;
+  const badge = isOwner ? 'Partner Onboarding' : 'Welcome';
+  const title = isOwner ? 'Welcome to the RoofOnClick Partner Network!' : 'Welcome to RoofOnClick!';
+  const message = isOwner
+    ? 'Thank you for joining RoofOnClick as a property partner. You can now list verified student accommodations, manage live resident enquiries, and track bookings with zero brokerage.'
+    : 'Welcome to RoofOnClick — your trusted student & professional housing platform in Indore. Start discovering verified hostels, PGs, and apartments with zero brokerage and transparent pricing.';
+
+  const actionUrl = isOwner ? '/owner/properties' : '/properties';
+  const actionText = isOwner ? 'List Your First Property' : 'Explore Verified PGs';
+
+  const details = [
+    { label: 'Account Type', value: isOwner ? 'Property Owner / Partner' : 'Resident / Seeker' },
+    { label: 'Zero Brokerage', value: '100% Guaranteed' },
+    { label: 'Location Hub', value: 'Indore, MP' },
+  ];
+
+  await sendTransactionalEmail({
+    to,
+    name,
+    subject,
+    badge,
+    title,
+    message,
+    details,
+    actionUrl,
+    actionText,
+  });
+}
+
+module.exports = {
+  sendTransactionalEmail,
+  dispatchNotificationEmail,
+  sendPasswordResetEmail,
+  sendOAuthAccountEmail,
+  sendWelcomeEmail,
+};

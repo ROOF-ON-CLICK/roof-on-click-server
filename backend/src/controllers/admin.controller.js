@@ -2,6 +2,7 @@ const Listing = require('../models/Listing.model');
 const User = require('../models/User.model');
 const Booking = require('../models/Booking.model');
 const Review = require('../models/Review.model');
+const { createNotification } = require('../services/notification.service');
 const { success, error } = require('../utils/apiResponse');
 
 // ─── GET /api/admin/stats ─────────────────────────────────────────────────────
@@ -151,6 +152,47 @@ const setListingStatus = async (req, res, next) => {
 
     if (!listing) {
       return error(res, { message: 'Listing not found.', statusCode: 404 });
+    }
+
+    // ── Notify Property Owner of Status Change ──
+    if (listing.owner) {
+      let notifType = 'property.rejected';
+      let notifTitle = 'Property Listing Status Updated';
+      let notifMessage = `Your property listing "${listing.title}" status has been set to '${status}'.`;
+
+      if (status === 'active') {
+        notifType = 'property.approved';
+        notifTitle = 'Property Listing Approved! 🎉';
+        notifMessage = `Your property "${listing.title}" has been reviewed, approved, and is now live on RoofOnClick!`;
+      } else if (status === 'rejected') {
+        notifType = 'property.rejected';
+        notifTitle = 'Property Listing Rejected';
+        notifMessage = `Your property listing "${listing.title}" was reviewed and rejected. Please review listing guidelines.`;
+      } else if (status === 'inactive') {
+        notifType = 'property.suspended';
+        notifTitle = 'Property Listing Suspended ⚠️';
+        notifMessage = `Your property listing "${listing.title}" has been suspended by platform administration.`;
+      } else if (status === 'deleted') {
+        notifType = 'property.deleted';
+        notifTitle = 'Property Listing Removed';
+        notifMessage = `Your property listing "${listing.title}" has been removed from RoofOnClick.`;
+      }
+
+      createNotification({
+        recipient: listing.owner,
+        sender: req.user._id,
+        category: 'Property',
+        type: notifType,
+        title: notifTitle,
+        message: notifMessage,
+        actionUrl: '/owner/properties',
+        metadata: {
+          listingId: listing._id,
+          title: listing.title,
+          status,
+          isVerified: listing.isVerified,
+        },
+      });
     }
 
     return success(res, { message: `Listing status updated to '${status}'.`, data: { listing } });
