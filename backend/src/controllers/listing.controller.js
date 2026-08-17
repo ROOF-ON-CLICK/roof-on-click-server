@@ -1,6 +1,7 @@
 const { validationResult } = require('express-validator');
 const Listing = require('../models/Listing.model');
 const User = require('../models/User.model');
+const { createNotification, createBulkNotifications } = require('../services/notification.service');
 const { success, error } = require('../utils/apiResponse');
 
 // ─── GET /api/listings ────────────────────────────────────────────────────────
@@ -188,6 +189,47 @@ const createListing = async (req, res, next) => {
       status: 'pending',
       isVerified: false,
     });
+
+    // ── 1. Notify Owner of Successful Submission ──
+    createNotification({
+      recipient: req.user._id,
+      category: 'Property',
+      type: 'property.submitted',
+      title: 'Property Submitted for Review',
+      message: `Your property listing "${listing.title}" has been submitted and is currently pending admin verification.`,
+      actionUrl: '/owner/properties',
+      metadata: {
+        listingId: listing._id,
+        title: listing.title,
+      },
+    });
+
+    // ── 2. Notify all Platform Admins in Real-Time ──
+    (async () => {
+      try {
+        const admins = await User.find({ role: 'admin' }).select('_id');
+        if (admins.length > 0) {
+          createBulkNotifications(
+            admins.map((admin) => ({
+              recipient: admin._id,
+              sender: req.user._id,
+              category: 'Property',
+              type: 'property.review_needed',
+              title: 'New Property Pending Approval',
+              message: `New listing "${listing.title}" in ${listing.address?.city || 'Indore'} submitted by ${req.user.name || 'an owner'} requires verification.`,
+              actionUrl: '/admin/properties',
+              metadata: {
+                listingId: listing._id,
+                ownerId: req.user._id,
+                ownerName: req.user.name,
+              },
+            }))
+          );
+        }
+      } catch (adminNotifErr) {
+        console.error('[listing.controller] Failed to notify admins:', adminNotifErr.message);
+      }
+    })();
 
     return success(res, {
       message: 'Property submitted for admin examination & site verification.',

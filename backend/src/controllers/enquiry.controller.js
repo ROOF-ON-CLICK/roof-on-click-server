@@ -1,6 +1,7 @@
 const { validationResult } = require('express-validator');
 const Enquiry = require('../models/Enquiry.model');
 const Listing = require('../models/Listing.model');
+const { createNotification } = require('../services/notification.service');
 const { success, error } = require('../utils/apiResponse');
 
 // ─── POST /api/enquiries/:listingId ──────────────────────────────────────────
@@ -37,6 +38,45 @@ const submitEnquiry = async (req, res, next) => {
       preferredTime: preferredTime || null,
       notes: notes || null,
     });
+
+    // ── Notify Property Owner ──
+    if (listing.owner) {
+      const typeLabel = requestType === 'Visit' ? 'Scheduled Visit' : 'Enquiry';
+      createNotification({
+        recipient: listing.owner,
+        sender: req.user?._id || null,
+        category: requestType === 'Visit' ? 'Visit' : 'Enquiry',
+        type: 'enquiry.created',
+        title: `New ${typeLabel} Request`,
+        message: `${name} (${phone}) submitted a ${typeLabel.toLowerCase()} request for "${listing.title}".`,
+        actionUrl: '/owner/enquiries',
+        metadata: {
+          enquiryId: enquiry._id,
+          listingId: listing._id,
+          name,
+          phone,
+          requestType: enquiry.requestType,
+          preferredDate: enquiry.preferredDate,
+          preferredTime: enquiry.preferredTime,
+        },
+      });
+    }
+
+    // ── Notify Seeker if authenticated ──
+    if (req.user?._id) {
+      createNotification({
+        recipient: req.user._id,
+        category: requestType === 'Visit' ? 'Visit' : 'Enquiry',
+        type: 'enquiry.submitted',
+        title: `${requestType || 'Enquiry'} Request Sent`,
+        message: `Your ${requestType || 'enquiry'} request for "${listing.title}" was submitted to the owner.`,
+        actionUrl: '/profile/enquiries',
+        metadata: {
+          enquiryId: enquiry._id,
+          listingId: listing._id,
+        },
+      });
+    }
 
     return success(res, {
       message: 'Enquiry submitted successfully. The owner will get in touch with you.',

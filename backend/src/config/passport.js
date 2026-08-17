@@ -1,5 +1,7 @@
 const passport = require('passport');
 const User = require('../models/User.model');
+const { sendWelcomeEmail } = require('../services/email.service');
+const { createNotification } = require('../services/notification.service');
 
 const isOAuthConfigured =
   !!process.env.GOOGLE_CLIENT_ID && !!process.env.GOOGLE_CLIENT_SECRET;
@@ -47,6 +49,23 @@ if (isOAuthConfigured) {
                 role: 'seeker',
                 isVerified: true, // Google-verified email
               });
+
+              // Send Welcome Email & Notification asynchronously
+              (async () => {
+                try {
+                  await sendWelcomeEmail(user.email, user.name, user.role);
+                  await createNotification({
+                    recipient: user._id,
+                    category: 'System',
+                    type: 'system.welcome',
+                    title: 'Welcome to RoofOnClick! 🏠',
+                    message: 'Welcome to RoofOnClick! Start exploring verified student hostels, PGs, and apartments across Indore.',
+                    actionUrl: '/properties',
+                  });
+                } catch (welcomeErr) {
+                  console.error('[passport] Failed to send welcome email:', welcomeErr.message);
+                }
+              })();
             }
           }
 

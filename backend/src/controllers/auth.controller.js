@@ -1,7 +1,8 @@
 const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
 const { randomUUID, createHash, randomBytes } = require('crypto');
-const { sendPasswordResetEmail, sendOAuthAccountEmail } = require('../services/email.service');
+const { sendPasswordResetEmail, sendOAuthAccountEmail, sendWelcomeEmail } = require('../services/email.service');
+const { createNotification } = require('../services/notification.service');
 const { validationResult } = require('express-validator');
 
 const User = require('../models/User.model');
@@ -109,6 +110,25 @@ const register = async (req, res, next) => {
       password: hashedPassword,
       role: allowedRole,
     });
+
+    // ── Welcome Email & In-App Notification ──
+    (async () => {
+      try {
+        await sendWelcomeEmail(user.email, user.name, user.role);
+        await createNotification({
+          recipient: user._id,
+          category: 'System',
+          type: 'system.welcome',
+          title: 'Welcome to RoofOnClick! 🏠',
+          message: user.role === 'owner'
+            ? 'Welcome to the RoofOnClick partner network! You can now list verified student accommodations with zero brokerage.'
+            : 'Welcome to RoofOnClick! Start exploring verified student hostels, PGs, and apartments across Indore.',
+          actionUrl: user.role === 'owner' ? '/owner/properties' : '/properties',
+        });
+      } catch (welcomeErr) {
+        console.error('[auth.controller] Failed to dispatch welcome email/notification:', welcomeErr.message);
+      }
+    })();
 
     const { token: accessToken } = signAccessToken(user);
     const familyId = randomUUID();

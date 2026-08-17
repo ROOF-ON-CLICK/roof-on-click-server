@@ -1,6 +1,7 @@
 const { randomUUID } = require('crypto');
 const Booking = require('../models/Booking.model');
 const Listing = require('../models/Listing.model');
+const { createNotification } = require('../services/notification.service');
 const { success, error } = require('../utils/apiResponse');
 
 // ─── POST /api/bookings ───────────────────────────────────────────────────────
@@ -39,6 +40,45 @@ const createBooking = async (req, res, next) => {
       },
       status: 'pending',
     });
+
+    // ── Notify Property Owner ──
+    if (listing.owner) {
+      createNotification({
+        recipient: listing.owner,
+        sender: req.user?._id || null,
+        category: 'Booking',
+        type: 'booking.created',
+        title: 'New Booking Reservation Received',
+        message: `New reservation (${reservationId}) received for "${booking.propertyName}" from ${guestDetails?.fullName || 'a guest'}.`,
+        actionUrl: '/owner/bookings',
+        metadata: {
+          bookingId: booking._id,
+          reservationId,
+          listingId: listing._id,
+          totalDueNow: booking.pricing.totalDueNow,
+          guestName: guestDetails?.fullName,
+          guestPhone: guestDetails?.phone,
+        },
+      });
+    }
+
+    // ── Notify Seeker / Tenant (if logged in) ──
+    if (req.user?._id) {
+      createNotification({
+        recipient: req.user._id,
+        category: 'Booking',
+        type: 'booking.submitted',
+        title: 'Booking Request Submitted',
+        message: `Your booking reservation (${reservationId}) for "${booking.propertyName}" was submitted and is pending owner confirmation.`,
+        actionUrl: '/profile/bookings',
+        metadata: {
+          bookingId: booking._id,
+          reservationId,
+          listingId: listing._id,
+          propertyName: booking.propertyName,
+        },
+      });
+    }
 
     return success(res, {
       message: 'Booking reservation submitted and pending owner confirmation.',
@@ -88,7 +128,7 @@ const updateBookingStatus = async (req, res, next) => {
       return error(res, { message: 'Invalid status value.', statusCode: 400 });
     }
 
-    const booking = await Booking.findById(req.params.id).populate('property', 'owner');
+    const booking = await Booking.findById(req.params.id).populate('property', 'owner title');
     if (!booking) {
       return error(res, { message: 'Booking not found.', statusCode: 404 });
     }
@@ -103,6 +143,25 @@ const updateBookingStatus = async (req, res, next) => {
     booking.status = status;
     await booking.save();
 
+    // ── Notify Tenant / Seeker if linked ──
+    if (booking.user) {
+      const statusTitle = status.charAt(0).toUpperCase() + status.slice(1);
+      createNotification({
+        recipient: booking.user,
+        sender: req.user._id,
+        category: 'Booking',
+        type: `booking.${status}`,
+        title: `Booking Reservation ${statusTitle}`,
+        message: `Your reservation (${booking.reservationId}) for "${booking.propertyName}" has been marked as ${status}.`,
+        actionUrl: '/profile/bookings',
+        metadata: {
+          bookingId: booking._id,
+          reservationId: booking.reservationId,
+          status,
+        },
+      });
+    }
+
     return success(res, { message: `Booking status updated to ${status}.`, data: { booking } });
   } catch (err) {
     next(err);
@@ -112,7 +171,7 @@ const updateBookingStatus = async (req, res, next) => {
 // ─── PUT /api/bookings/:id/cancel ────────────────────────────────────────────
 const cancelBooking = async (req, res, next) => {
   try {
-    const booking = await Booking.findById(req.params.id);
+    const booking = await Booking.findById(req.params.id).populate('property', 'owner');
     if (!booking) {
       return error(res, { message: 'Booking not found.', statusCode: 404 });
     }
@@ -123,6 +182,40 @@ const cancelBooking = async (req, res, next) => {
 
     booking.status = 'cancelled';
     await booking.save();
+
+    // ── Notify Property Owner ──
+    if (booking.property?.owner && booking.property.owner.toString() !== req.user._id.toString()) {
+      createNotification({
+        recipient: booking.property.owner,
+        sender: req.user._id,
+        category: 'Booking',
+        type: 'booking.cancelled',
+        title: 'Booking Reservation Cancelled',
+        message: `Reservation (${booking.reservationId}) for "${booking.propertyName}" was cancelled by the tenant.`,
+        actionUrl: '/owner/bookings',
+        metadata: {
+          bookingId: booking._id,
+          reservationId: booking.reservationId,
+        },
+      });
+    }
+
+    // ── If Admin cancelled, notify tenant ──
+    if (req.user.role === 'admin' && booking.user) {
+      createNotification({
+        recipient: booking.user,
+        sender: req.user._id,
+        category: 'Booking',
+        type: 'booking.cancelled',
+        title: 'Booking Cancelled by Admin',
+        message: `Your reservation (${booking.reservationId}) for "${booking.propertyName}" was cancelled by the platform administrator.`,
+        actionUrl: '/profile/bookings',
+        metadata: {
+          bookingId: booking._id,
+          reservationId: booking.reservationId,
+        },
+      });
+    }
 
     return success(res, { message: 'Booking cancelled successfully.', data: { booking } });
   } catch (err) {
