@@ -91,6 +91,16 @@ const userSchema = new mongoose.Schema(
       type: Boolean,
       default: false,
     },
+    // Password Reset — token stored as SHA-256 hash; never the raw token
+    resetPasswordToken: {
+      type: String,
+      default: null,
+      select: false, // never returned in normal queries
+    },
+    resetPasswordExpires: {
+      type: Date,
+      default: null,
+    },
   },
   {
     timestamps: true,
