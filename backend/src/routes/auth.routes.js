@@ -3,7 +3,7 @@ const passport = require('passport');
 const { body } = require('express-validator');
 const rateLimit = require('express-rate-limit');
 
-const { register, login, refresh, logout, logoutAll, getMe, googleCallback } = require('../controllers/auth.controller');
+const { register, login, refresh, logout, logoutAll, getMe, googleCallback, forgotPassword, verifyResetToken, resetPassword } = require('../controllers/auth.controller');
 const { verifyToken } = require('../middleware/auth.middleware');
 
 const router = express.Router();
@@ -13,6 +13,15 @@ const authLimiter = rateLimit({
   windowMs: 15 * 60 * 1000, // 15 minutes
   max: 20,
   message: { success: false, message: 'Too many attempts. Please try again after 15 minutes.' },
+  standardHeaders: true,
+  legacyHeaders: false,
+});
+
+// Tighter limiter for password reset — 5 requests per 15 min per IP
+const resetLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: 5,
+  message: { success: false, message: 'Too many password reset attempts. Please try again after 15 minutes.' },
   standardHeaders: true,
   legacyHeaders: false,
 });
@@ -73,5 +82,10 @@ router.get(
   passport.authenticate('google', { session: false, failureRedirect: `${process.env.FRONTEND_URL}/login?error=oauth_failed` }),
   googleCallback
 );
+
+// Password reset
+router.post('/forgot-password', resetLimiter, forgotPassword);
+router.get('/verify-reset-token', verifyResetToken);
+router.post('/reset-password', resetLimiter, resetPassword);
 
 module.exports = router;

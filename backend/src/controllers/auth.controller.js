@@ -1,6 +1,7 @@
 const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
-const { randomUUID, createHash } = require('crypto');
+const { randomUUID, createHash, randomBytes } = require('crypto');
+const { sendPasswordResetEmail, sendOAuthAccountEmail } = require('../services/email.service');
 const { validationResult } = require('express-validator');
 
 const User = require('../models/User.model');
@@ -96,7 +97,7 @@ const register = async (req, res, next) => {
 
     const existing = await User.findOne({ email: email.toLowerCase() });
     if (existing) {
-      return error(res, { message: 'An account with this email already exists.', statusCode: 409 });
+      return error(res, { message: 'An account with this email already exists. Please log in.', statusCode: 409 });
     }
 
     const hashedPassword = await bcrypt.hash(password, 12);
@@ -327,4 +328,139 @@ const googleCallback = async (req, res) => {
   }
 };
 
-module.exports = { register, login, refresh, logout, logoutAll, getMe, googleCallback };
+// ─────────────────────────────────────────────────────────────────────────────
+// POST /api/auth/forgot-password
+// Always returns 200 to prevent account enumeration.
+// ─────────────────────────────────────────────────────────────────────────────
+const forgotPassword = async (req, res, next) => {
+  try {
+    const { email } = req.body;
+    if (!email) {
+      return error(res, { message: 'Email is required.', statusCode: 400 });
+    }
+
+    const GENERIC_MSG = 'If an account exists with that email, a password reset link has been sent.';
+
+    const user = await User.findOne({ email: email.toLowerCase().trim() }).select('+password');
+    if (!user) {
+      // Do NOT reveal that the account doesn't exist
+      return success(res, { message: GENERIC_MSG });
+    }
+
+    // Google OAuth-only accounts have googleId and no password — send a helpful redirect email instead
+    if (user.googleId && !user.password) {
+      try {
+        await sendOAuthAccountEmail(user.email, user.name);
+      } catch (emailErr) {
+        console.error('[forgotPassword] Failed to send OAuth hint email:', emailErr);
+      }
+      return success(res, { message: GENERIC_MSG });
+    }
+
+    // Generate cryptographically secure raw token
+    const rawToken = randomBytes(32).toString('hex');
+    const hashedToken = createHash('sha256').update(rawToken).digest('hex');
+
+    user.resetPasswordToken = hashedToken;
+    user.resetPasswordExpires = new Date(Date.now() + 15 * 60 * 1000); // 15 min
+    await user.save();
+
+    try {
+      await sendPasswordResetEmail(user.email, user.name, rawToken);
+    } catch (emailErr) {
+      // Roll back token so user can retry
+      user.resetPasswordToken = null;
+      user.resetPasswordExpires = null;
+      await user.save();
+      console.error('[forgotPassword] Failed to send reset email:', emailErr);
+      return error(res, { message: 'Failed to send reset email. Please try again.', statusCode: 500 });
+    }
+
+    return success(res, { message: GENERIC_MSG });
+  } catch (err) {
+    next(err);
+  }
+};
+
+// ─────────────────────────────────────────────────────────────────────────────
+// GET /api/auth/verify-reset-token?token=<rawToken>
+// Lets the frontend validate the token before showing the reset form.
+// ─────────────────────────────────────────────────────────────────────────────
+const verifyResetToken = async (req, res, next) => {
+  try {
+    const { token } = req.query;
+    if (!token) {
+      return error(res, { message: 'Token is required.', statusCode: 400 });
+    }
+
+    const hashedToken = createHash('sha256').update(token).digest('hex');
+
+    const user = await User.findOne({
+      resetPasswordToken: hashedToken,
+      resetPasswordExpires: { $gt: new Date() },
+    }).select('+resetPasswordToken');
+
+    if (!user) {
+      return error(res, { message: 'Reset link is invalid or has expired.', statusCode: 400 });
+    }
+
+    return success(res, { message: 'Token is valid.' });
+  } catch (err) {
+    next(err);
+  }
+};
+
+// ─────────────────────────────────────────────────────────────────────────────
+// POST /api/auth/reset-password
+// Body: { token, password }
+// On success: clears all Redis refresh-token sessions (logs out all devices)
+// ─────────────────────────────────────────────────────────────────────────────
+const resetPassword = async (req, res, next) => {
+  try {
+    const { token, password } = req.body;
+
+    if (!token || !password) {
+      return error(res, { message: 'Token and new password are required.', statusCode: 400 });
+    }
+
+    if (password.length < 8) {
+      return error(res, { message: 'Password must be at least 8 characters.', statusCode: 400 });
+    }
+
+    const hashedToken = createHash('sha256').update(token).digest('hex');
+
+    const user = await User.findOne({
+      resetPasswordToken: hashedToken,
+      resetPasswordExpires: { $gt: new Date() },
+    }).select('+resetPasswordToken +password');
+
+    if (!user) {
+      return error(res, { message: 'Reset link is invalid or has expired.', statusCode: 400 });
+    }
+
+    // Update password
+    const salt = await bcrypt.genSalt(12);
+    user.password = await bcrypt.hash(password, salt);
+    user.resetPasswordToken = null;
+    user.resetPasswordExpires = null;
+    await user.save();
+
+    // Invalidate ALL Redis refresh-token sessions for this user
+    try {
+      const pattern = `refresh:${user._id.toString()}:*`;
+      const keys = await redis.keys(pattern);
+      if (keys.length > 0) {
+        await redis.del(...keys);
+      }
+    } catch (redisErr) {
+      // Non-fatal — password is already changed
+      console.error('[resetPassword] Redis session clear failed:', redisErr);
+    }
+
+    return success(res, { message: 'Password has been reset successfully. Please log in with your new password.' });
+  } catch (err) {
+    next(err);
+  }
+};
+
+module.exports = { register, login, refresh, logout, logoutAll, getMe, googleCallback, forgotPassword, verifyResetToken, resetPassword };
