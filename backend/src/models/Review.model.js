@@ -66,6 +66,19 @@ const reviewSchema = new mongoose.Schema(
       replyDate: { type: Date },
       isVerifiedOwner: { type: Boolean, default: true },
     },
+    status: {
+      type: String,
+      enum: ['published', 'pending', 'flagged', 'hidden', 'deleted'],
+      default: 'published',
+    },
+    reportCount: {
+      type: Number,
+      default: 0,
+    },
+    flagReason: {
+      type: String,
+      default: null,
+    },
   },
   {
     timestamps: true,

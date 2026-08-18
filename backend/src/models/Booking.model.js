@@ -43,8 +43,33 @@ const bookingSchema = new mongoose.Schema(
     },
     status: {
       type: String,
-      enum: ['pending', 'confirmed', 'rejected', 'cancelled', 'completed'],
+      enum: ['pending', 'confirmed', 'rejected', 'cancelled', 'completed', 'refunded'],
       default: 'pending',
+    },
+    paymentStatus: {
+      type: String,
+      enum: ['pending', 'paid', 'failed', 'refunded'],
+      default: 'paid',
+    },
+    refund: {
+      status: {
+        type: String,
+        enum: ['none', 'requested', 'processing', 'refunded', 'rejected'],
+        default: 'none',
+      },
+      amount: { type: Number, default: 0 },
+      reason: { type: String, default: null },
+      processedAt: { type: Date, default: null },
+      txnId: { type: String, default: null },
+    },
+    assignedExecutive: {
+      name: { type: String, default: 'Rajat Verma' },
+      phone: { type: String, default: '+91 98260 11442' },
+      email: { type: String, default: 'rajat@roofonclick.com' },
+    },
+    specialRequests: {
+      type: String,
+      default: null,
     },
   },
   {
