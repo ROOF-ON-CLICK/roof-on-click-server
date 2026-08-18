@@ -29,12 +29,21 @@ const getListings = async (req, res, next) => {
 
     // Build filter — always only show active listings
     const filter = { status: 'active' };
-
-    if (city) filter['address.city'] = { $regex: city, $options: 'i' };
-    if (area) filter['address.area'] = { $regex: area, $options: 'i' };
-    if (type) filter.type = type;
-    if (gender) filter.gender = gender;
-    if (verified === 'true') filter.isVerified = true;
+    
+    if (city) {
+      const cleanCity = decodeURIComponent(city).replace(/\+/g, ' ').trim();
+      filter['address.city'] = { $regex: cleanCity, $options: 'i' };
+    }
+    if (area) {
+      const cleanArea = decodeURIComponent(area).replace(/\+/g, ' ').trim();
+      filter['address.area'] = { $regex: cleanArea, $options: 'i' };
+    }
+    if (type) {
+      const cleanType = type.trim().replace(/-/g, '[- ]?');
+      filter.type = { $regex: `^${cleanType}$`, $options: 'i' };
+    }
+    if (gender) filter.gender = { $regex: `^${gender.trim()}$`, $options: 'i' };
+    if (verified === 'true' || verified === true) filter.isVerified = true;
 
     // Rent range
     if (minRent || maxRent) {
@@ -417,6 +426,41 @@ const deletePhoto = async (req, res, next) => {
   }
 };
 
+// ─── GET /api/listings/cities ──────────────────────────────────────────────────
+/**
+ * Return supported and active cities with listing counts.
+ */
+const getAvailableCities = async (req, res, next) => {
+  try {
+    const registry = [
+      { id: 'indore', name: 'Indore', state: 'Madhya Pradesh', isLive: true },
+      { id: 'bhopal', name: 'Bhopal', state: 'Madhya Pradesh', isLive: false },
+      { id: 'kota', name: 'Kota', state: 'Rajasthan', isLive: false },
+      { id: 'pune', name: 'Pune', state: 'Maharashtra', isLive: false },
+      { id: 'jaipur', name: 'Jaipur', state: 'Rajasthan', isLive: false },
+      { id: 'bangalore', name: 'Bangalore', state: 'Karnataka', isLive: false },
+    ];
+
+    const citiesWithCounts = await Promise.all(
+      registry.map(async (c) => {
+        const count = await Listing.countDocuments({
+          status: 'active',
+          'address.city': { $regex: new RegExp(`^${c.name}$`, 'i') },
+        });
+        return {
+          ...c,
+          isLive: c.isLive || count > 0,
+          listingCount: count,
+        };
+      })
+    );
+
+    return success(res, { data: { cities: citiesWithCounts } });
+  } catch (err) {
+    next(err);
+  }
+};
+
 module.exports = {
   getListings,
   getListing,
@@ -426,4 +470,5 @@ module.exports = {
   getWhatsAppLink,
   uploadPhotos,
   deletePhoto,
+  getAvailableCities,
 };
