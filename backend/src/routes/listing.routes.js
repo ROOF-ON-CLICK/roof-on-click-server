@@ -10,6 +10,7 @@ const {
   getWhatsAppLink,
   uploadPhotos,
   deletePhoto,
+  getAvailableCities,
 } = require('../controllers/listing.controller');
 
 const { verifyToken, optionalAuth, requireRole, isOwnerOf } = require('../middleware/auth.middleware');
@@ -37,6 +38,7 @@ const listingValidation = [
 
 // ─── Public Routes ────────────────────────────────────────────────────────────
 router.get('/', optionalAuth, getListings);
+router.get('/cities', getAvailableCities);
 router.get('/:id', optionalAuth, getListing);
 router.get('/:id/whatsapp-link', getWhatsAppLink);
 
