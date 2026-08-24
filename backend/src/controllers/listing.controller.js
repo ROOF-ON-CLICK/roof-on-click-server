@@ -206,7 +206,7 @@ const createListing = async (req, res, next) => {
       type: 'property.submitted',
       title: 'Property Submitted for Review',
       message: `Your property listing "${listing.title}" has been submitted and is currently pending admin verification.`,
-      actionUrl: '/owner/properties',
+      actionUrl: '/owner/dashboard',
       metadata: {
         listingId: listing._id,
         title: listing.title,
@@ -226,7 +226,7 @@ const createListing = async (req, res, next) => {
               type: 'property.review_needed',
               title: 'New Property Pending Approval',
               message: `New listing "${listing.title}" in ${listing.address?.city || 'Indore'} submitted by ${req.user.name || 'an owner'} requires verification.`,
-              actionUrl: '/admin/properties',
+              actionUrl: '/admin',
               metadata: {
                 listingId: listing._id,
                 ownerId: req.user._id,

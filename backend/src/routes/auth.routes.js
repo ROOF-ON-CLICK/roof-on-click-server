@@ -3,7 +3,19 @@ const passport = require('passport');
 const { body } = require('express-validator');
 const rateLimit = require('express-rate-limit');
 
-const { register, login, refresh, logout, logoutAll, getMe, googleCallback, forgotPassword, verifyResetToken, resetPassword } = require('../controllers/auth.controller');
+const {
+  register,
+  login,
+  refresh,
+  logout,
+  logoutAll,
+  getMe,
+  googleCallback,
+  forgotPassword,
+  verifyResetToken,
+  resetPassword,
+  changePassword,
+} = require('../controllers/auth.controller');
 const { verifyToken } = require('../middleware/auth.middleware');
 
 const router = express.Router();
@@ -26,13 +38,18 @@ const resetLimiter = rateLimit({
   legacyHeaders: false,
 });
 
-// ─── Validation Rules ─────────────────────────────────────────────────────────
 const registerValidation = [
   body('name').trim().notEmpty().withMessage('Name is required'),
   body('email').isEmail().withMessage('Valid email is required').normalizeEmail(),
   body('password')
     .isLength({ min: 8 })
     .withMessage('Password must be at least 8 characters'),
+  body('phone')
+    .trim()
+    .notEmpty()
+    .withMessage('Mobile number is required')
+    .matches(/^[6-9]\d{9}$|^\+?[1-9]\d{9,14}$/)
+    .withMessage('Please enter a valid 10-digit mobile number'),
 ];
 
 const loginValidation = [
@@ -60,6 +77,7 @@ router.post('/login', authLimiter, loginValidation, login);
 router.post('/logout', verifyToken, logout);
 router.post('/logout-all', verifyToken, logoutAll);
 router.get('/me', verifyToken, getMe);
+router.post('/change-password', verifyToken, authLimiter, changePassword);
 
 // Token refresh — rate-limited to prevent abuse
 router.post(

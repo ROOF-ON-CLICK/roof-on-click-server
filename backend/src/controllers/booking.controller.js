@@ -50,7 +50,7 @@ const createBooking = async (req, res, next) => {
         type: 'booking.created',
         title: 'New Booking Reservation Received',
         message: `New reservation (${reservationId}) received for "${booking.propertyName}" from ${guestDetails?.fullName || 'a guest'}.`,
-        actionUrl: '/owner/bookings',
+        actionUrl: '/owner/dashboard',
         metadata: {
           bookingId: booking._id,
           reservationId,
@@ -70,7 +70,7 @@ const createBooking = async (req, res, next) => {
         type: 'booking.submitted',
         title: 'Booking Request Submitted',
         message: `Your booking reservation (${reservationId}) for "${booking.propertyName}" was submitted and is pending owner confirmation.`,
-        actionUrl: '/profile/bookings',
+        actionUrl: '/booking',
         metadata: {
           bookingId: booking._id,
           reservationId,
@@ -153,7 +153,7 @@ const updateBookingStatus = async (req, res, next) => {
         type: `booking.${status}`,
         title: `Booking Reservation ${statusTitle}`,
         message: `Your reservation (${booking.reservationId}) for "${booking.propertyName}" has been marked as ${status}.`,
-        actionUrl: '/profile/bookings',
+        actionUrl: '/booking',
         metadata: {
           bookingId: booking._id,
           reservationId: booking.reservationId,
@@ -192,7 +192,7 @@ const cancelBooking = async (req, res, next) => {
         type: 'booking.cancelled',
         title: 'Booking Reservation Cancelled',
         message: `Reservation (${booking.reservationId}) for "${booking.propertyName}" was cancelled by the tenant.`,
-        actionUrl: '/owner/bookings',
+        actionUrl: '/owner/dashboard',
         metadata: {
           bookingId: booking._id,
           reservationId: booking.reservationId,
@@ -209,7 +209,7 @@ const cancelBooking = async (req, res, next) => {
         type: 'booking.cancelled',
         title: 'Booking Cancelled by Admin',
         message: `Your reservation (${booking.reservationId}) for "${booking.propertyName}" was cancelled by the platform administrator.`,
-        actionUrl: '/profile/bookings',
+        actionUrl: '/booking',
         metadata: {
           bookingId: booking._id,
           reservationId: booking.reservationId,

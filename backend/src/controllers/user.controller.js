@@ -50,12 +50,12 @@ const getSavedListings = async (req, res, next) => {
       .populate({
         path: 'savedListings',
         match: { status: 'active' },
-        select: 'title address.area address.city rent.monthly type gender photos isVerified',
+        select: 'title address rent type gender photos amenities rooms isVerified apartmentDetails nearby rules',
       });
 
     return success(res, {
       message: 'Saved listings fetched.',
-      data: { listings: user.savedListings },
+      data: { listings: (user.savedListings || []).filter(Boolean) },
     });
   } catch (err) {
     next(err);
@@ -65,18 +65,21 @@ const getSavedListings = async (req, res, next) => {
 // ─── POST /api/users/saved/:listingId ────────────────────────────────────────
 const saveListing = async (req, res, next) => {
   try {
-    const listing = await Listing.findOne({ _id: req.params.listingId, status: 'active' });
+    const listing = await Listing.findOne({ _id: req.params.listingId, status: { $ne: 'deleted' } });
     if (!listing) {
       return error(res, { message: 'Listing not found.', statusCode: 404 });
     }
 
     const user = await User.findById(req.user._id);
-    if (user.savedListings.includes(req.params.listingId)) {
-      return error(res, { message: 'Listing already saved.', statusCode: 409 });
-    }
+    if (!user.savedListings) user.savedListings = [];
+    const alreadySaved = user.savedListings.some(
+      (id) => id && id.toString() === req.params.listingId.toString()
+    );
 
-    user.savedListings.push(req.params.listingId);
-    await user.save();
+    if (!alreadySaved) {
+      user.savedListings.push(req.params.listingId);
+      await user.save();
+    }
 
     return success(res, { message: 'Listing saved.', data: { savedListings: user.savedListings } });
   } catch (err) {
@@ -87,9 +90,14 @@ const saveListing = async (req, res, next) => {
 // ─── DELETE /api/users/saved/:listingId ──────────────────────────────────────
 const unsaveListing = async (req, res, next) => {
   try {
-    await User.findByIdAndUpdate(req.user._id, {
-      $pull: { savedListings: req.params.listingId },
-    });
+    const listingId = (req.params.listingId || '').toString();
+    const user = await User.findById(req.user._id);
+    if (user && user.savedListings) {
+      user.savedListings = user.savedListings.filter(
+        (id) => id && id.toString() !== listingId
+      );
+      await user.save();
+    }
 
     return success(res, { message: 'Listing removed from saved.' });
   } catch (err) {
@@ -104,13 +112,13 @@ const getRecentlyViewed = async (req, res, next) => {
       .select('recentlyViewed')
       .populate({
         path: 'recentlyViewed.listingId',
-        match: { status: 'active' },
-        select: 'title address.area rent.monthly type gender photos isVerified',
+        match: { status: { $ne: 'deleted' } },
+        select: 'title address rent type gender photos amenities rooms isVerified apartmentDetails nearby rules',
       });
 
     // Sort by viewedAt descending (most recent first)
-    const sorted = user.recentlyViewed
-      .filter((rv) => rv.listingId) // filter out deleted listings
+    const sorted = (user.recentlyViewed || [])
+      .filter((rv) => rv && rv.listingId) // filter out deleted listings
       .sort((a, b) => new Date(b.viewedAt) - new Date(a.viewedAt));
 
     return success(res, { message: 'Recently viewed listings fetched.', data: { listings: sorted } });

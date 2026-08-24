@@ -186,7 +186,7 @@ const setListingStatus = async (req, res, next) => {
         type: notifType,
         title: notifTitle,
         message: notifMessage,
-        actionUrl: '/owner/properties',
+        actionUrl: '/owner/dashboard',
         metadata: {
           listingId: listing._id,
           title: listing.title,
@@ -505,7 +505,7 @@ const broadcastNotification = async (req, res, next) => {
           type: 'system.alert',
           title: title || 'Important Announcement',
           message: message || 'You have a new update from RoofOnClick Admin.',
-          actionUrl: '/dashboard',
+          actionUrl: '/profile',
         })
       )
     );
@@ -612,7 +612,7 @@ const updateAdminBookingStatus = async (req, res, next) => {
         type: status === 'confirmed' ? 'booking.confirmed' : 'booking.cancelled',
         title: `Booking ${status === 'confirmed' ? 'Confirmed' : 'Status Updated'}`,
         message: `Your booking for '${booking.propertyName || 'Property'}' is now '${status}'.`,
-        actionUrl: `/booking/${booking._id}`,
+        actionUrl: '/booking',
         metadata: { bookingId: booking._id, status },
       });
     }
@@ -657,7 +657,7 @@ const processBookingRefund = async (req, res, next) => {
         type: 'payment.success',
         title: 'Refund Processed Successfully',
         message: `₹${refundAmount.toLocaleString()} has been refunded to your original payment method for booking ${booking.reservationId || booking._id}.`,
-        actionUrl: `/booking/${booking._id}`,
+        actionUrl: '/booking',
         metadata: { bookingId: booking._id, refundAmount, txnId: refundTxnId },
       });
     }
