@@ -49,7 +49,7 @@ const submitEnquiry = async (req, res, next) => {
         type: 'enquiry.created',
         title: `New ${typeLabel} Request`,
         message: `${name} (${phone}) submitted a ${typeLabel.toLowerCase()} request for "${listing.title}".`,
-        actionUrl: '/owner/enquiries',
+        actionUrl: '/owner/dashboard',
         metadata: {
           enquiryId: enquiry._id,
           listingId: listing._id,
@@ -70,7 +70,7 @@ const submitEnquiry = async (req, res, next) => {
         type: 'enquiry.submitted',
         title: `${requestType || 'Enquiry'} Request Sent`,
         message: `Your ${requestType || 'enquiry'} request for "${listing.title}" was submitted to the owner.`,
-        actionUrl: '/profile/enquiries',
+        actionUrl: '/profile',
         metadata: {
           enquiryId: enquiry._id,
           listingId: listing._id,

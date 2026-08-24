@@ -94,7 +94,7 @@ const register = async (req, res, next) => {
       return error(res, { message: 'Validation failed', statusCode: 422, errors: errors.array() });
     }
 
-    const { name, email, password, role } = req.body;
+    const { name, email, password, role, phone } = req.body;
 
     const existing = await User.findOne({ email: email.toLowerCase() });
     if (existing) {
@@ -109,6 +109,7 @@ const register = async (req, res, next) => {
       email: email.toLowerCase(),
       password: hashedPassword,
       role: allowedRole,
+      phone: phone ? phone.trim() : null,
     });
 
     // ── Welcome Email & In-App Notification ──
@@ -483,4 +484,85 @@ const resetPassword = async (req, res, next) => {
   }
 };
 
-module.exports = { register, login, refresh, logout, logoutAll, getMe, googleCallback, forgotPassword, verifyResetToken, resetPassword };
+// ─────────────────────────────────────────────────────────────────────────────
+// POST /api/auth/change-password
+// Requires Auth: req.user.userId
+// Body: { currentPassword, newPassword }
+// ─────────────────────────────────────────────────────────────────────────────
+const changePassword = async (req, res, next) => {
+  try {
+    const { currentPassword, newPassword } = req.body;
+    const userId = req.user?.userId;
+
+    if (!userId) {
+      return error(res, { message: 'Authentication required.', statusCode: 401 });
+    }
+
+    if (!newPassword || newPassword.length < 8) {
+      return error(res, { message: 'New password must be at least 8 characters long.', statusCode: 400 });
+    }
+
+    const user = await User.findById(userId).select('+password');
+    if (!user) {
+      return error(res, { message: 'User not found.', statusCode: 404 });
+    }
+
+    // If user registered via Google OAuth and never set a password
+    if (!user.password) {
+      const salt = await bcrypt.genSalt(12);
+      user.password = await bcrypt.hash(newPassword, salt);
+      await user.save();
+
+      createNotification({
+        recipient: user._id,
+        category: 'Account',
+        title: 'Password Set Successfully',
+        message: 'You have created a password for your account.',
+        actionUrl: '/profile',
+      }).catch(() => {});
+
+      return success(res, { message: 'Password created successfully.' });
+    }
+
+    if (!currentPassword) {
+      return error(res, { message: 'Current password is required.', statusCode: 400 });
+    }
+
+    const isMatch = await bcrypt.compare(currentPassword, user.password);
+    if (!isMatch) {
+      return error(res, { message: 'Current password is incorrect. Please try again.', statusCode: 400 });
+    }
+
+    // Update password
+    const salt = await bcrypt.genSalt(12);
+    user.password = await bcrypt.hash(newPassword, salt);
+    await user.save();
+
+    // Create in-app security notification
+    createNotification({
+      recipient: user._id,
+      category: 'Account',
+      title: 'Password Changed',
+      message: 'Your password was changed successfully.',
+      actionUrl: '/profile',
+    }).catch(() => {});
+
+    return success(res, { message: 'Password updated successfully.' });
+  } catch (err) {
+    next(err);
+  }
+};
+
+module.exports = {
+  register,
+  login,
+  refresh,
+  logout,
+  logoutAll,
+  getMe,
+  googleCallback,
+  forgotPassword,
+  verifyResetToken,
+  resetPassword,
+  changePassword,
+};
