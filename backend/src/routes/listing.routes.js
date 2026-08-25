@@ -11,6 +11,9 @@ const {
   uploadPhotos,
   deletePhoto,
   getAvailableCities,
+  getMyDraft,
+  saveMyDraft,
+  deleteMyDraft,
 } = require('../controllers/listing.controller');
 
 const { verifyToken, optionalAuth, requireRole, isOwnerOf } = require('../middleware/auth.middleware');
@@ -35,6 +38,11 @@ const listingValidation = [
     .matches(/^(\+91|91)?[6-9]\d{9}$/)
     .withMessage('Invalid Indian mobile number. Must be a 10-digit number starting with 6-9, optionally prefixed with +91 or 91'),
 ];
+
+// ─── Draft Routes — Owner only (must come before /:id) ─────────────────────────
+router.get('/my/draft', verifyToken, requireRole('owner'), getMyDraft);
+router.post('/my/draft', verifyToken, requireRole('owner'), saveMyDraft);
+router.delete('/my/draft', verifyToken, requireRole('owner'), deleteMyDraft);
 
 // ─── Public Routes ────────────────────────────────────────────────────────────
 router.get('/', optionalAuth, getListings);

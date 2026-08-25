@@ -1,5 +1,6 @@
 const { validationResult } = require('express-validator');
 const Listing = require('../models/Listing.model');
+const ListingDraft = require('../models/ListingDraft.model');
 const User = require('../models/User.model');
 const { createNotification, createBulkNotifications } = require('../services/notification.service');
 const { success, error } = require('../utils/apiResponse');
@@ -481,6 +482,61 @@ const getAvailableCities = async (req, res, next) => {
   }
 };
 
+// ─── GET /api/listings/my/draft ───────────────────────────────────────────────
+/**
+ * Retrieve authenticated owner's active wizard draft from MongoDB.
+ */
+const getMyDraft = async (req, res, next) => {
+  try {
+    const draft = await ListingDraft.findOne({ owner: req.user._id }).lean();
+    return success(res, {
+      message: draft ? 'Draft retrieved.' : 'No active draft found.',
+      data: { draft: draft || null },
+    });
+  } catch (err) {
+    next(err);
+  }
+};
+
+// ─── POST /api/listings/my/draft ──────────────────────────────────────────────
+/**
+ * Upsert authenticated owner's active wizard draft.
+ */
+const saveMyDraft = async (req, res, next) => {
+  try {
+    const { currentStep = 1, formValues = {} } = req.body;
+    const draft = await ListingDraft.findOneAndUpdate(
+      { owner: req.user._id },
+      {
+        owner: req.user._id,
+        currentStep: Number(currentStep) || 1,
+        formValues,
+      },
+      { new: true, upsert: true, setDefaultsOnInsert: true }
+    );
+
+    return success(res, {
+      message: 'Draft saved successfully.',
+      data: { draft },
+    });
+  } catch (err) {
+    next(err);
+  }
+};
+
+// ─── DELETE /api/listings/my/draft ────────────────────────────────────────────
+/**
+ * Remove authenticated owner's wizard draft.
+ */
+const deleteMyDraft = async (req, res, next) => {
+  try {
+    await ListingDraft.findOneAndDelete({ owner: req.user._id });
+    return success(res, { message: 'Draft cleared successfully.' });
+  } catch (err) {
+    next(err);
+  }
+};
+
 module.exports = {
   getListings,
   getListing,
@@ -491,4 +547,7 @@ module.exports = {
   uploadPhotos,
   deletePhoto,
   getAvailableCities,
+  getMyDraft,
+  saveMyDraft,
+  deleteMyDraft,
 };
