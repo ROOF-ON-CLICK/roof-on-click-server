@@ -91,13 +91,35 @@ router.post(
 router.get(
   '/google',
   oauthGuard,
-  passport.authenticate('google', { scope: ['profile', 'email'], session: false })
+  (req, res, next) => {
+    const { intent = 'login', role = 'seeker' } = req.query;
+    const state = Buffer.from(JSON.stringify({ intent, role })).toString('base64');
+    passport.authenticate('google', {
+      scope: ['profile', 'email'],
+      session: false,
+      state,
+    })(req, res, next);
+  }
 );
 
 router.get(
   '/google/callback',
   oauthGuard,
-  passport.authenticate('google', { session: false, failureRedirect: `${process.env.FRONTEND_URL}/login?error=oauth_failed` }),
+  (req, res, next) => {
+    passport.authenticate('google', { session: false }, (err, user) => {
+      if (err) {
+        if (err.message === 'ACCOUNT_NOT_FOUND' || err.code === 'ACCOUNT_NOT_FOUND') {
+          return res.redirect(`${process.env.FRONTEND_URL}/login?error=account_not_found`);
+        }
+        return res.redirect(`${process.env.FRONTEND_URL}/login?error=oauth_failed`);
+      }
+      if (!user) {
+        return res.redirect(`${process.env.FRONTEND_URL}/login?error=oauth_failed`);
+      }
+      req.user = user;
+      next();
+    })(req, res, next);
+  },
   googleCallback
 );
 

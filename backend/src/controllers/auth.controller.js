@@ -167,13 +167,17 @@ const login = async (req, res, next) => {
     const { email, password } = req.body;
 
     const user = await User.findOne({ email: email.toLowerCase() }).select('+password');
-    if (!user || !user.password) {
-      return error(res, { message: 'Invalid email or password.', statusCode: 401 });
+    if (!user) {
+      return error(res, { message: 'No account found with this email address. Please sign up first.', statusCode: 404 });
+    }
+
+    if (!user.password) {
+      return error(res, { message: 'This account was registered using Google. Please click Continue with Google to sign in.', statusCode: 400 });
     }
 
     const isMatch = await bcrypt.compare(password, user.password);
     if (!isMatch) {
-      return error(res, { message: 'Invalid email or password.', statusCode: 401 });
+      return error(res, { message: 'Incorrect password. Please try again.', statusCode: 401 });
     }
 
     const { token: accessToken } = signAccessToken(user);
