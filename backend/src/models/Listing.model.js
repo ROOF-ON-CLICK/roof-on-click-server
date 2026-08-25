@@ -175,6 +175,78 @@ const listingSchema = new mongoose.Schema(
       ref: 'User',
       default: null,
     },
+    subscription: {
+      status: {
+        type: String,
+        enum: ['trial', 'active', 'expired'],
+        default: 'trial',
+      },
+      paymentStatus: {
+        type: String,
+        enum: ['trial', 'paid', 'pending', 'failed'],
+        default: 'trial',
+      },
+      paymentId: {
+        type: String,
+        default: null,
+      },
+      planType: {
+        type: String,
+        default: 'annual',
+      },
+      amountPaid: {
+        type: Number,
+        default: 0,
+      },
+      startDate: {
+        type: Date,
+        default: Date.now,
+      },
+      expiresAt: {
+        type: Date,
+        default: null,
+      },
+    },
+    verificationService: {
+      isRequested: {
+        type: Boolean,
+        default: false,
+      },
+      paymentStatus: {
+        type: String,
+        enum: ['not_requested', 'paid', 'pending', 'failed'],
+        default: 'not_requested',
+      },
+      paymentMode: {
+        type: String,
+        enum: ['onsite_upi', 'razorpay', 'free_trial', 'none'],
+        default: 'onsite_upi',
+      },
+      paymentId: {
+        type: String,
+        default: null,
+      },
+      fee: {
+        type: Number,
+        default: 299,
+      },
+      validityMonths: {
+        type: Number,
+        default: 6,
+      },
+      paidAt: {
+        type: Date,
+        default: null,
+      },
+      verifiedAt: {
+        type: Date,
+        default: null,
+      },
+      expiresAt: {
+        type: Date,
+        default: null,
+      },
+    },
 
     // ─── Engagement ────────────────────────────────────────────────────────
     viewCount: {

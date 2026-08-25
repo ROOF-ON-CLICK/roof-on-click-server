@@ -186,17 +186,37 @@ const createListing = async (req, res, next) => {
       return error(res, { message: 'Validation failed', statusCode: 422, errors: errors.array() });
     }
 
-    // Auto-promote seeker → owner
+    // Auto-promote seeker → owner & start trial if not set
     if (req.user.role === 'seeker') {
-      await User.findByIdAndUpdate(req.user._id, { role: 'owner' });
+      const trialEndsAt = new Date(Date.now() + 90 * 24 * 60 * 60 * 1000);
+      await User.findByIdAndUpdate(req.user._id, { role: 'owner', trialEndsAt, isTrialActive: true });
       req.user.role = 'owner';
+      req.user.trialEndsAt = trialEndsAt;
+      req.user.isTrialActive = true;
     }
+
+    const trialExpiresAt = req.user.trialEndsAt || new Date(Date.now() + 90 * 24 * 60 * 60 * 1000);
+    const verificationRequested = Boolean(req.body.requestVerification || req.body.verificationService?.isRequested);
 
     const listing = await Listing.create({
       ...req.body,
       owner: req.user._id,
       status: 'pending',
       isVerified: false,
+      subscription: {
+        status: 'trial',
+        planType: 'annual',
+        amountPaid: 0,
+        startDate: new Date(),
+        expiresAt: trialExpiresAt,
+      },
+      verificationService: {
+        isRequested: verificationRequested,
+        paymentStatus: verificationRequested ? 'pending' : 'not_requested',
+        paymentMode: verificationRequested ? 'onsite_upi' : 'none',
+        fee: 299,
+        validityMonths: 6,
+      },
     });
 
     // ── 1. Notify Owner of Successful Submission ──
