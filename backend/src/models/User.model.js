@@ -36,6 +36,14 @@ const userSchema = new mongoose.Schema(
       type: String,
       default: null,
     },
+    trialEndsAt: {
+      type: Date,
+      default: null,
+    },
+    isTrialActive: {
+      type: Boolean,
+      default: false,
+    },
     savedListings: [
       {
         type: mongoose.Schema.Types.ObjectId,

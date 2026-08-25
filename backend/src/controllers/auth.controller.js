@@ -103,6 +103,8 @@ const register = async (req, res, next) => {
 
     const hashedPassword = await bcrypt.hash(password, 12);
     const allowedRole = ['seeker', 'owner'].includes(role) ? role : 'seeker';
+    const isOwner = allowedRole === 'owner';
+    const trialEndsAt = isOwner ? new Date(Date.now() + 90 * 24 * 60 * 60 * 1000) : null;
 
     const user = await User.create({
       name,
@@ -110,6 +112,8 @@ const register = async (req, res, next) => {
       password: hashedPassword,
       role: allowedRole,
       phone: phone ? phone.trim() : null,
+      trialEndsAt,
+      isTrialActive: isOwner,
     });
 
     // ── Welcome Email & In-App Notification ──

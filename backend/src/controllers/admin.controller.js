@@ -3,6 +3,7 @@ const User = require('../models/User.model');
 const Booking = require('../models/Booking.model');
 const Review = require('../models/Review.model');
 const SupportTicket = require('../models/SupportTicket.model');
+const Payment = require('../models/Payment.model');
 const { createNotification } = require('../services/notification.service');
 const { success, error } = require('../utils/apiResponse');
 
@@ -101,7 +102,7 @@ const getAllListings = async (req, res, next) => {
 
 // ─── PUT /api/admin/listings/:id/verify ──────────────────────────────────────
 /**
- * Toggle isVerified — grants "Assured" badge.
+ * Toggle isVerified & confirm on-site Direct UPI verification payment (₹299).
  */
 const verifyListing = async (req, res, next) => {
   try {
@@ -110,13 +111,72 @@ const verifyListing = async (req, res, next) => {
       return error(res, { message: 'Listing not found.', statusCode: 404 });
     }
 
-    listing.isVerified = !listing.isVerified;
-    listing.verifiedAt = listing.isVerified ? new Date() : null;
-    listing.verifiedBy = listing.isVerified ? req.user._id : null;
+    const isNowVerified = !listing.isVerified;
+    listing.isVerified = isNowVerified;
+    listing.verifiedAt = isNowVerified ? new Date() : null;
+    listing.verifiedBy = isNowVerified ? req.user._id : null;
+
+    if (isNowVerified) {
+      const sixMonthsFromNow = new Date();
+      sixMonthsFromNow.setMonth(sixMonthsFromNow.getMonth() + 6);
+      const upiPaymentRef = req.body?.paymentRef || `upi_onsite_${Date.now()}`;
+
+      listing.verificationService = {
+        isRequested: true,
+        paymentStatus: 'paid',
+        paymentMode: 'onsite_upi',
+        paymentId: upiPaymentRef,
+        fee: 299,
+        validityMonths: 6,
+        paidAt: new Date(),
+        verifiedAt: new Date(),
+        expiresAt: sixMonthsFromNow,
+      };
+
+      // Record ₹299 Direct UPI payment transaction
+      try {
+        await Payment.create({
+          orderId: `order_onsite_${Date.now()}`,
+          paymentId: upiPaymentRef,
+          user: listing.owner,
+          listing: listing._id,
+          type: 'verification_service',
+          amount: 299,
+          currency: 'INR',
+          status: 'paid',
+          gateway: 'Direct UPI (On-Site)',
+          paidAt: new Date(),
+          metadata: {
+            verifiedByAdmin: req.user._id,
+            verifiedAt: new Date().toISOString(),
+            method: 'Direct UPI On-Site Audit',
+          },
+        });
+      } catch (payErr) {
+        console.warn('[Payment] Failed to record On-Site UPI transaction:', payErr.message);
+      }
+
+      // Notify owner of on-site verification completion
+      try {
+        await createNotification({
+          recipient: listing.owner,
+          category: 'Verification',
+          type: 'listing.verified',
+          title: 'Property Verified On-Site! 🛡️',
+          message: `Your property "${listing.title}" has been physically audited by our ground team and ₹299 Direct UPI payment was confirmed. The Assured badge is now active for 6 months!`,
+          actionUrl: `/property/${listing._id}`,
+        });
+      } catch (notifErr) {
+        console.warn('[Notification] Dispatch failed:', notifErr.message);
+      }
+    } else if (listing.verificationService) {
+      listing.verificationService.verifiedAt = null;
+      listing.verificationService.expiresAt = null;
+    }
     await listing.save();
 
     return success(res, {
-      message: `Listing ${listing.isVerified ? 'verified (Assured)' : 'unverified'} successfully.`,
+      message: `Listing ${listing.isVerified ? 'verified (Assured — ₹299 On-Site UPI Paid)' : 'unverified'} successfully.`,
       data: { listing },
     });
   } catch (err) {
