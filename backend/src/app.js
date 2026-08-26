@@ -32,15 +32,30 @@ app.use(morgan(process.env.NODE_ENV === 'production' ? 'combined' : 'dev'));
 
 // ─── CORS ─────────────────────────────────────────────────────────────────────
 // ENV=dev  → allow all origins (for local development)
-// ENV=prod → restrict to FRONTEND_URL only
-const corsOrigin =
-  process.env.ENV === 'prod' ? process.env.FRONTEND_URL : '*';
+// ENV=prod → hardcoded to https://www.roofonclick.com and https://roofonclick.com
+const prodOrigins = [
+  'https://www.roofonclick.com',
+  'https://roofonclick.com',
+  ...(process.env.FRONTEND_URL ? [process.env.FRONTEND_URL.replace(/\/$/, '')] : []),
+];
+
+const isProd = process.env.ENV === 'prod' || process.env.NODE_ENV === 'production';
 
 app.use(
   cors({
-    origin: corsOrigin,
-    credentials: process.env.ENV === 'prod', // credentials require a specific origin
-    methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
+    origin: isProd
+      ? function (origin, callback) {
+          // Allow requests with no origin (e.g. mobile apps, curl, server-to-server)
+          if (!origin) return callback(null, true);
+          if (prodOrigins.includes(origin.replace(/\/$/, ''))) {
+            return callback(null, true);
+          }
+          return callback(new Error('Not allowed by CORS'));
+        }
+      : '*',
+    credentials: isProd,
+    methods: ['GET', 'POST', 'PUT', 'DELETE', 'PATCH', 'OPTIONS'],
+    allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With', 'Accept', 'Origin'],
   })
 );
 
