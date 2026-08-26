@@ -15,12 +15,26 @@ const listingSchema = new mongoose.Schema(
     },
     type: {
       type: String,
-      enum: ['hostel', 'pg', 'shared-room', 'private-room', 'apartment', 'studio', '1-bhk', '2-bhk', '3-bhk', '4-bhk'],
+      enum: [
+        'hostel',
+        'pg',
+        'shared-room',
+        'private-room',
+        'apartment',
+        'studio',
+        'studio-apartment',
+        '1-bhk',
+        '2-bhk',
+        '3-bhk',
+        '4-bhk',
+        '4+-bhk',
+        'rk',
+      ],
       required: [true, 'Listing type is required'],
     },
     gender: {
       type: String,
-      enum: ['boys', 'girls', 'co-ed'],
+      enum: ['boys', 'girls', 'co-ed', 'unisex', 'any', 'co-living'],
       required: [true, 'Gender preference is required'],
     },
     description: {

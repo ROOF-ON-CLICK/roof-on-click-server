@@ -26,9 +26,25 @@ const router = express.Router();
 const listingValidation = [
   body('title').trim().notEmpty().withMessage('Title is required'),
   body('type')
-    .isIn(['hostel', 'pg', 'shared-room', 'private-room', 'apartment', 'studio', '1-bhk', '2-bhk', '3-bhk', '4-bhk'])
+    .isIn([
+      'hostel',
+      'pg',
+      'shared-room',
+      'private-room',
+      'apartment',
+      'studio',
+      'studio-apartment',
+      'rk',
+      '1-bhk',
+      '2-bhk',
+      '3-bhk',
+      '4-bhk',
+      '4+-bhk',
+    ])
     .withMessage('Invalid listing type'),
-  body('gender').isIn(['boys', 'girls', 'co-ed']).withMessage('Invalid gender option'),
+  body('gender')
+    .isIn(['boys', 'girls', 'co-ed', 'unisex', 'any', 'co-living'])
+    .withMessage('Invalid gender option'),
   body('rent.monthly').isNumeric().withMessage('Monthly rent must be a number'),
   body('address.area').trim().notEmpty().withMessage('Area is required'),
   body('address.city').trim().notEmpty().withMessage('City is required'),
