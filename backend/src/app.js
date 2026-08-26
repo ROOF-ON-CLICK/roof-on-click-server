@@ -26,38 +26,33 @@ require('./config/passport');
 
 const app = express();
 
-// ─── Security & Utility Middleware ───────────────────────────────────────────
-app.use(helmet());
-app.use(morgan(process.env.NODE_ENV === 'production' ? 'combined' : 'dev'));
-
 // ─── CORS ─────────────────────────────────────────────────────────────────────
-// ENV=dev  → allow all origins (for local development)
-// ENV=prod → hardcoded to https://www.roofonclick.com and https://roofonclick.com
-const prodOrigins = [
-  'https://www.roofonclick.com',
-  'https://roofonclick.com',
-  ...(process.env.FRONTEND_URL ? [process.env.FRONTEND_URL.replace(/\/$/, '')] : []),
-];
+const corsOptions = {
+  origin: [
+    'https://www.roofonclick.com',
+    'https://roofonclick.com',
+    'http://localhost:8001',
+  ], // Allow all origins by dynamically reflecting the request origin (supports credentials)
+  credentials: true,
+  methods: '*',
+  allowedHeaders: '*',
+  exposedHeaders: '*',
+  optionsSuccessStatus: 200,
+};
 
-const isProd = process.env.ENV === 'prod' || process.env.NODE_ENV === 'production';
+const corsMiddleware = cors(corsOptions);
+app.use(corsMiddleware);
+app.options('*', corsMiddleware);
 
+// ─── Security & Utility Middleware ───────────────────────────────────────────
 app.use(
-  cors({
-    origin: isProd
-      ? function (origin, callback) {
-          // Allow requests with no origin (e.g. mobile apps, curl, server-to-server)
-          if (!origin) return callback(null, true);
-          if (prodOrigins.includes(origin.replace(/\/$/, ''))) {
-            return callback(null, true);
-          }
-          return callback(new Error('Not allowed by CORS'));
-        }
-      : '*',
-    credentials: isProd,
-    methods: ['GET', 'POST', 'PUT', 'DELETE', 'PATCH', 'OPTIONS'],
-    allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With', 'Accept', 'Origin'],
+  helmet({
+    crossOriginResourcePolicy: false,
+    crossOriginEmbedderPolicy: false,
+    crossOriginOpenerPolicy: false,
   })
 );
+app.use(morgan(process.env.NODE_ENV === 'production' ? 'combined' : 'dev'));
 
 // ─── Body Parsing ─────────────────────────────────────────────────────────────
 app.use(express.json({ limit: '10mb' }));
