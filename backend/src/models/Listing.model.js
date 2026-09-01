@@ -9,7 +9,8 @@ const listingSchema = new mongoose.Schema(
     },
     title: {
       type: String,
-      required: [true, 'Title is required'],
+      required: [function () { return (this.status || '').toLowerCase() !== 'draft'; }, 'Title is required'],
+      default: 'Untitled Property Draft',
       trim: true,
       maxlength: [200, 'Title cannot exceed 200 characters'],
     },
@@ -30,12 +31,14 @@ const listingSchema = new mongoose.Schema(
         '4+-bhk',
         'rk',
       ],
-      required: [true, 'Listing type is required'],
+      required: [function () { return (this.status || '').toLowerCase() !== 'draft'; }, 'Listing type is required'],
+      default: 'pg',
     },
     gender: {
       type: String,
       enum: ['boys', 'girls', 'co-ed', 'unisex', 'any', 'co-living'],
-      required: [true, 'Gender preference is required'],
+      required: [function () { return (this.status || '').toLowerCase() !== 'draft'; }, 'Gender preference is required'],
+      default: 'unisex',
     },
     description: {
       type: String,
@@ -48,13 +51,15 @@ const listingSchema = new mongoose.Schema(
       street: { type: String, trim: true },
       area: {
         type: String,
-        required: [true, 'Area is required'],
+        required: [function () { return (this.status || '').toLowerCase() !== 'draft'; }, 'Area is required'],
         trim: true,
+        default: '',
       },
       city: {
         type: String,
-        required: [true, 'City is required'],
+        required: [function () { return (this.status || '').toLowerCase() !== 'draft'; }, 'City is required'],
         trim: true,
+        default: 'Indore',
       },
       pincode: { type: String, trim: true },
       landmark: { type: String, trim: true },
@@ -75,8 +80,9 @@ const listingSchema = new mongoose.Schema(
     rent: {
       monthly: {
         type: Number,
-        required: [true, 'Monthly rent is required'],
+        required: [function () { return (this.status || '').toLowerCase() !== 'draft'; }, 'Monthly rent is required'],
         min: [0, 'Rent cannot be negative'],
+        default: 0,
       },
       deposit: {
         type: Number,
@@ -159,8 +165,8 @@ const listingSchema = new mongoose.Schema(
     // ─── Media ─────────────────────────────────────────────────────────────
     photos: [
       {
-        url: { type: String, required: true },  // CDN/S3 public URL
-        key: { type: String, required: true },  // S3 object key for deletion
+        url: { type: String, required: function () { return (this.status || '').toLowerCase() !== 'draft'; } },  // CDN/S3 public URL
+        key: { type: String, required: function () { return (this.status || '').toLowerCase() !== 'draft'; } },  // S3 object key for deletion
       },
     ],
 
@@ -173,8 +179,20 @@ const listingSchema = new mongoose.Schema(
     // ─── Status & Verification ─────────────────────────────────────────────
     status: {
       type: String,
-      enum: ['pending', 'active', 'inactive', 'rejected', 'deleted'],
+      enum: ['draft', 'pending', 'active', 'inactive', 'rejected', 'deleted'],
       default: 'pending',
+    },
+    wizardState: {
+      currentStep: {
+        type: Number,
+        default: 1,
+        min: 1,
+        max: 6,
+      },
+      formValues: {
+        type: mongoose.Schema.Types.Mixed,
+        default: {},
+      },
     },
     isVerified: {
       type: Boolean,
@@ -272,6 +290,29 @@ const listingSchema = new mongoose.Schema(
     timestamps: true,
   }
 );
+
+// ─── Pre-save Strict Validation for Publishing ───────────────────────────────
+listingSchema.pre('save', function (next) {
+  const currentStatus = (this.status || '').toLowerCase();
+  if (currentStatus === 'pending' || currentStatus === 'active') {
+    if (!this.title || this.title.trim().length < 3) {
+      return next(new Error('Property title is required (at least 3 characters) to submit for approval.'));
+    }
+    if (!this.address?.city || !this.address.city.trim()) {
+      return next(new Error('City is required to submit for approval.'));
+    }
+    if (!this.address?.area || !this.address.area.trim()) {
+      return next(new Error('Area / Locality is required to submit for approval.'));
+    }
+    if (typeof this.rent?.monthly !== 'number' || this.rent.monthly <= 0) {
+      return next(new Error('Valid monthly rent is required to submit for approval.'));
+    }
+    if (!this.photos || this.photos.length < 5) {
+      return next(new Error('At least 5 property photos are required to submit for approval.'));
+    }
+  }
+  next();
+});
 
 // ─── Indexes ────────────────────────────────────────────────────────────────
 // Geospatial index for location-based queries
