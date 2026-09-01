@@ -11,9 +11,6 @@ const {
   uploadPhotos,
   deletePhoto,
   getAvailableCities,
-  getMyDraft,
-  saveMyDraft,
-  deleteMyDraft,
 } = require('../controllers/listing.controller');
 
 const { verifyToken, optionalAuth, requireRole, isOwnerOf } = require('../middleware/auth.middleware');
@@ -24,8 +21,13 @@ const router = express.Router();
 
 // ─── Validation ───────────────────────────────────────────────────────────────
 const listingValidation = [
-  body('title').trim().notEmpty().withMessage('Title is required'),
+  body('title')
+    .if((value, { req }) => req.body.status !== 'draft')
+    .trim()
+    .notEmpty()
+    .withMessage('Title is required'),
   body('type')
+    .if((value, { req }) => req.body.status !== 'draft')
     .isIn([
       'hostel',
       'pg',
@@ -43,22 +45,29 @@ const listingValidation = [
     ])
     .withMessage('Invalid listing type'),
   body('gender')
+    .if((value, { req }) => req.body.status !== 'draft')
     .isIn(['boys', 'girls', 'co-ed', 'unisex', 'any', 'co-living'])
     .withMessage('Invalid gender option'),
-  body('rent.monthly').isNumeric().withMessage('Monthly rent must be a number'),
-  body('address.area').trim().notEmpty().withMessage('Area is required'),
-  body('address.city').trim().notEmpty().withMessage('City is required'),
+  body('rent.monthly')
+    .if((value, { req }) => req.body.status !== 'draft')
+    .isNumeric()
+    .withMessage('Monthly rent must be a number'),
+  body('address.area')
+    .if((value, { req }) => req.body.status !== 'draft')
+    .trim()
+    .notEmpty()
+    .withMessage('Area is required'),
+  body('address.city')
+    .if((value, { req }) => req.body.status !== 'draft')
+    .trim()
+    .notEmpty()
+    .withMessage('City is required'),
   body('ownerWhatsapp')
     .optional()
     .trim()
     .matches(/^(\+91|91)?[6-9]\d{9}$/)
     .withMessage('Invalid Indian mobile number. Must be a 10-digit number starting with 6-9, optionally prefixed with +91 or 91'),
 ];
-
-// ─── Draft Routes — Owner only (must come before /:id) ─────────────────────────
-router.get('/my/draft', verifyToken, requireRole('owner'), getMyDraft);
-router.post('/my/draft', verifyToken, requireRole('owner'), saveMyDraft);
-router.delete('/my/draft', verifyToken, requireRole('owner'), deleteMyDraft);
 
 // ─── Public Routes ────────────────────────────────────────────────────────────
 router.get('/', optionalAuth, getListings);

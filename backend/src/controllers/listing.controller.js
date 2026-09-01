@@ -198,11 +198,16 @@ const createListing = async (req, res, next) => {
 
     const trialExpiresAt = req.user.trialEndsAt || new Date(Date.now() + 90 * 24 * 60 * 60 * 1000);
     const verificationRequested = Boolean(req.body.requestVerification || req.body.verificationService?.isRequested);
+    const rawStatus = (req.body.status || '').toLowerCase();
+    const isDraft = rawStatus === 'draft';
+    const status = isDraft ? 'draft' : 'pending';
+
+    const { status: _ignoredStatus, ...cleanBody } = req.body;
 
     const listing = await Listing.create({
-      ...req.body,
+      ...cleanBody,
       owner: req.user._id,
-      status: 'pending',
+      status,
       isVerified: false,
       subscription: {
         status: 'trial',
@@ -220,49 +225,53 @@ const createListing = async (req, res, next) => {
       },
     });
 
-    // ── 1. Notify Owner of Successful Submission ──
-    createNotification({
-      recipient: req.user._id,
-      category: 'Property',
-      type: 'property.submitted',
-      title: 'Property Submitted for Review',
-      message: `Your property listing "${listing.title}" has been submitted and is currently pending admin verification.`,
-      actionUrl: '/owner/dashboard',
-      metadata: {
-        listingId: listing._id,
-        title: listing.title,
-      },
-    });
+    if (!isDraft) {
+      // ── 1. Notify Owner of Successful Submission ──
+      createNotification({
+        recipient: req.user._id,
+        category: 'Property',
+        type: 'property.submitted',
+        title: 'Property Submitted for Review',
+        message: `Your property listing "${listing.title}" has been submitted and is currently pending admin verification.`,
+        actionUrl: '/owner/dashboard',
+        metadata: {
+          listingId: listing._id,
+          title: listing.title,
+        },
+      });
 
-    // ── 2. Notify all Platform Admins in Real-Time ──
-    (async () => {
-      try {
-        const admins = await User.find({ role: 'admin' }).select('_id');
-        if (admins.length > 0) {
-          createBulkNotifications(
-            admins.map((admin) => ({
-              recipient: admin._id,
-              sender: req.user._id,
-              category: 'Property',
-              type: 'property.review_needed',
-              title: 'New Property Pending Approval',
-              message: `New listing "${listing.title}" in ${listing.address?.city || 'Indore'} submitted by ${req.user.name || 'an owner'} requires verification.`,
-              actionUrl: '/admin',
-              metadata: {
-                listingId: listing._id,
-                ownerId: req.user._id,
-                ownerName: req.user.name,
-              },
-            }))
-          );
+      // ── 2. Notify all Platform Admins in Real-Time ──
+      (async () => {
+        try {
+          const admins = await User.find({ role: 'admin' }).select('_id');
+          if (admins.length > 0) {
+            createBulkNotifications(
+              admins.map((admin) => ({
+                recipient: admin._id,
+                sender: req.user._id,
+                category: 'Property',
+                type: 'property.review_needed',
+                title: 'New Property Pending Approval',
+                message: `New listing "${listing.title}" in ${listing.address?.city || 'Indore'} submitted by ${req.user.name || 'an owner'} requires verification.`,
+                actionUrl: '/admin',
+                metadata: {
+                  listingId: listing._id,
+                  ownerId: req.user._id,
+                  ownerName: req.user.name,
+                },
+              }))
+            );
+          }
+        } catch (adminNotifErr) {
+          console.error('[listing.controller] Failed to notify admins:', adminNotifErr.message);
         }
-      } catch (adminNotifErr) {
-        console.error('[listing.controller] Failed to notify admins:', adminNotifErr.message);
-      }
-    })();
+      })();
+    }
 
     return success(res, {
-      message: 'Property submitted for admin examination & site verification.',
+      message: isDraft
+        ? 'Property draft saved successfully.'
+        : 'Property submitted for admin examination & site verification.',
       data: { listing },
       statusCode: 201,
     });
@@ -274,7 +283,7 @@ const createListing = async (req, res, next) => {
 // ─── PUT /api/listings/:id ────────────────────────────────────────────────────
 /**
  * Update listing — owner (own) or admin only.
- * Verified status can only be changed by admin via admin routes.
+ * Runs strict publish validation if status is transitioning to 'pending'.
  */
 const updateListing = async (req, res, next) => {
   try {
@@ -286,6 +295,50 @@ const updateListing = async (req, res, next) => {
     // Prevent changing sensitive fields via this route
     const { isVerified, verifiedAt, verifiedBy, owner, viewCount, ...updateData } = req.body;
 
+    const rawStatus = (updateData.status || '').toLowerCase();
+    const isPublishing = rawStatus === 'pending' || rawStatus === 'pending approval';
+    if (updateData.status) {
+      updateData.status = isPublishing
+        ? 'pending'
+        : rawStatus === 'draft'
+        ? 'draft'
+        : rawStatus === 'active'
+        ? 'active'
+        : rawStatus === 'inactive' || rawStatus === 'archived'
+        ? 'inactive'
+        : rawStatus === 'rejected'
+        ? 'rejected'
+        : rawStatus;
+    }
+    if (isPublishing) {
+      const currentDoc = await Listing.findById(req.params.id);
+      if (!currentDoc) {
+        return error(res, { message: 'Listing not found.', statusCode: 404 });
+      }
+
+      const mergedTitle = updateData.title || currentDoc.title;
+      const mergedCity = updateData.address?.city || currentDoc.address?.city;
+      const mergedArea = updateData.address?.area || currentDoc.address?.area;
+      const mergedRent = updateData.rent?.monthly ?? currentDoc.rent?.monthly;
+      const mergedPhotos = updateData.photos || currentDoc.photos || [];
+
+      if (!mergedTitle || mergedTitle.trim().length < 3) {
+        return error(res, { message: 'Property title must be at least 3 characters long to submit for approval.', statusCode: 400 });
+      }
+      if (!mergedCity || !mergedCity.trim()) {
+        return error(res, { message: 'City is required to submit for approval.', statusCode: 400 });
+      }
+      if (!mergedArea || !mergedArea.trim()) {
+        return error(res, { message: 'Area / Locality is required to submit for approval.', statusCode: 400 });
+      }
+      if (typeof mergedRent !== 'number' || mergedRent <= 0) {
+        return error(res, { message: 'Valid monthly rent is required to submit for approval.', statusCode: 400 });
+      }
+      if (!mergedPhotos || mergedPhotos.length < 5) {
+        return error(res, { message: 'At least 5 property photos are required to submit for approval.', statusCode: 400 });
+      }
+    }
+
     const listing = await Listing.findByIdAndUpdate(
       req.params.id,
       { $set: updateData },
@@ -294,6 +347,47 @@ const updateListing = async (req, res, next) => {
 
     if (!listing) {
       return error(res, { message: 'Listing not found.', statusCode: 404 });
+    }
+
+    if (isPublishing) {
+      createNotification({
+        recipient: req.user._id,
+        category: 'Property',
+        type: 'property.submitted',
+        title: 'Property Submitted for Review',
+        message: `Your property listing "${listing.title}" has been submitted and is currently pending admin verification.`,
+        actionUrl: '/owner/dashboard',
+        metadata: {
+          listingId: listing._id,
+          title: listing.title,
+        },
+      });
+
+      (async () => {
+        try {
+          const admins = await User.find({ role: 'admin' }).select('_id');
+          if (admins.length > 0) {
+            createBulkNotifications(
+              admins.map((admin) => ({
+                recipient: admin._id,
+                sender: req.user._id,
+                category: 'Property',
+                type: 'property.review_needed',
+                title: 'New Property Pending Approval',
+                message: `New listing "${listing.title}" in ${listing.address?.city || 'Indore'} submitted by ${req.user.name || 'an owner'} requires verification.`,
+                actionUrl: '/admin',
+                metadata: {
+                  listingId: listing._id,
+                  ownerId: req.user._id,
+                  ownerName: req.user.name,
+                },
+              }))
+            );
+          }
+        } catch (adminNotifErr) {
+          console.error('[listing.controller] Failed to notify admins:', adminNotifErr.message);
+        }
+      })();
     }
 
     return success(res, { message: 'Listing updated successfully.', data: { listing } });
@@ -414,13 +508,15 @@ const uploadPhotos = async (req, res, next) => {
  */
 const deletePhoto = async (req, res, next) => {
   try {
-    const listing = await Listing.findById(req.params.id);
+    const { id, photoKey } = req.params;
+
+    const listing = await Listing.findById(id);
     if (!listing) {
       return error(res, { message: 'Listing not found.', statusCode: 404 });
     }
 
-    const photoKey = decodeURIComponent(req.params.photoKey);
-    const photo = listing.photos.find((p) => p.key === photoKey);
+    const decodedPhotoKey = decodeURIComponent(photoKey);
+    const photo = listing.photos.find((p) => p.key === decodedPhotoKey);
 
     if (!photo) {
       return error(res, { message: 'Photo not found in this listing.', statusCode: 404 });
@@ -433,12 +529,12 @@ const deletePhoto = async (req, res, next) => {
     await r2Client.send(
       new DeleteObjectCommand({
         Bucket: process.env.R2_BUCKET_NAME,
-        Key: photoKey,
+        Key: decodedPhotoKey,
       })
     );
 
     // Remove from listing
-    listing.photos = listing.photos.filter((p) => p.key !== photoKey);
+    listing.photos = listing.photos.filter((p) => p.key !== decodedPhotoKey);
     await listing.save();
 
     return success(res, { message: 'Photo deleted successfully.', data: { photos: listing.photos } });
@@ -476,62 +572,7 @@ const getAvailableCities = async (req, res, next) => {
       })
     );
 
-    return success(res, { data: { cities: citiesWithCounts } });
-  } catch (err) {
-    next(err);
-  }
-};
-
-// ─── GET /api/listings/my/draft ───────────────────────────────────────────────
-/**
- * Retrieve authenticated owner's active wizard draft from MongoDB.
- */
-const getMyDraft = async (req, res, next) => {
-  try {
-    const draft = await ListingDraft.findOne({ owner: req.user._id }).lean();
-    return success(res, {
-      message: draft ? 'Draft retrieved.' : 'No active draft found.',
-      data: { draft: draft || null },
-    });
-  } catch (err) {
-    next(err);
-  }
-};
-
-// ─── POST /api/listings/my/draft ──────────────────────────────────────────────
-/**
- * Upsert authenticated owner's active wizard draft.
- */
-const saveMyDraft = async (req, res, next) => {
-  try {
-    const { currentStep = 1, formValues = {} } = req.body;
-    const draft = await ListingDraft.findOneAndUpdate(
-      { owner: req.user._id },
-      {
-        owner: req.user._id,
-        currentStep: Number(currentStep) || 1,
-        formValues,
-      },
-      { new: true, upsert: true, setDefaultsOnInsert: true }
-    );
-
-    return success(res, {
-      message: 'Draft saved successfully.',
-      data: { draft },
-    });
-  } catch (err) {
-    next(err);
-  }
-};
-
-// ─── DELETE /api/listings/my/draft ────────────────────────────────────────────
-/**
- * Remove authenticated owner's wizard draft.
- */
-const deleteMyDraft = async (req, res, next) => {
-  try {
-    await ListingDraft.findOneAndDelete({ owner: req.user._id });
-    return success(res, { message: 'Draft cleared successfully.' });
+    return success(res, { message: 'Cities fetched.', data: { cities: citiesWithCounts } });
   } catch (err) {
     next(err);
   }
@@ -547,7 +588,4 @@ module.exports = {
   uploadPhotos,
   deletePhoto,
   getAvailableCities,
-  getMyDraft,
-  saveMyDraft,
-  deleteMyDraft,
 };

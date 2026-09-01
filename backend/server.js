@@ -13,15 +13,15 @@ const startServer = async () => {
   try {
     await redis.connect();
     await redis.ping();
-    console.log('✅ Redis ready');
+    console.log('[Redis] Connected and ready');
   } catch (err) {
-    console.error('❌ Redis connection failed:', err.message);
+    console.error('[Redis] Connection failed:', err.message);
     process.exit(1);
   }
 
   // ── Step 3: HTTP Server ───────────────────────────────────────────────────
   app.listen(PORT, () => {
-    console.log(`🚀 RoofOnClick API running on port ${PORT} [${process.env.NODE_ENV}]`);
+    console.log(`[Server] RoofOnClick API running on port ${PORT} [${process.env.NODE_ENV}]`);
   });
 };
 
