@@ -116,12 +116,38 @@ const getRecentlyViewed = async (req, res, next) => {
         select: 'title address rent type gender photos amenities rooms isVerified apartmentDetails nearby rules',
       });
 
-    // Sort by viewedAt descending (most recent first)
+    // Sort by viewedAt descending (most recent first, up to 20)
     const sorted = (user.recentlyViewed || [])
       .filter((rv) => rv && rv.listingId) // filter out deleted listings
-      .sort((a, b) => new Date(b.viewedAt) - new Date(a.viewedAt));
+      .sort((a, b) => new Date(b.viewedAt) - new Date(a.viewedAt))
+      .slice(0, 20);
 
     return success(res, { message: 'Recently viewed listings fetched.', data: { listings: sorted } });
+  } catch (err) {
+    next(err);
+  }
+};
+
+// ─── DELETE /api/users/recently-viewed/:listingId ────────────────────────────
+const removeRecentlyViewed = async (req, res, next) => {
+  try {
+    const { listingId } = req.params;
+    await User.findByIdAndUpdate(req.user._id, {
+      $pull: { recentlyViewed: { listingId } },
+    });
+    return success(res, { message: 'Property removed from recently viewed history.' });
+  } catch (err) {
+    next(err);
+  }
+};
+
+// ─── DELETE /api/users/recently-viewed ───────────────────────────────────────
+const clearRecentlyViewed = async (req, res, next) => {
+  try {
+    await User.findByIdAndUpdate(req.user._id, {
+      $set: { recentlyViewed: [] },
+    });
+    return success(res, { message: 'Recently viewed history cleared.' });
   } catch (err) {
     next(err);
   }
@@ -191,6 +217,8 @@ module.exports = {
   saveListing,
   unsaveListing,
   getRecentlyViewed,
+  removeRecentlyViewed,
+  clearRecentlyViewed,
   getSearchHistory,
   clearSearchHistory,
   getMyListings,

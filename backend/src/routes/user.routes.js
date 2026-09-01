@@ -7,6 +7,8 @@ const {
   saveListing,
   unsaveListing,
   getRecentlyViewed,
+  removeRecentlyViewed,
+  clearRecentlyViewed,
   getSearchHistory,
   clearSearchHistory,
   getMyListings,
@@ -26,8 +28,10 @@ router.get('/saved', getSavedListings);
 router.post('/saved/:listingId', saveListing);
 router.delete('/saved/:listingId', unsaveListing);
 
-// Recently viewed
+// Recently viewed (persisted in DB, max 20)
 router.get('/recently-viewed', getRecentlyViewed);
+router.delete('/recently-viewed', clearRecentlyViewed);
+router.delete('/recently-viewed/:listingId', removeRecentlyViewed);
 
 // Search history
 router.get('/search-history', getSearchHistory);
