@@ -467,6 +467,17 @@ const resetPassword = async (req, res, next) => {
       return error(res, { message: 'Reset link is invalid or has expired.', statusCode: 400 });
     }
 
+    // Reuse prevention: Prevent resetting to the identical previous password
+    if (user.password) {
+      const isSameAsOld = await bcrypt.compare(password, user.password);
+      if (isSameAsOld) {
+        return error(res, {
+          message: 'New password cannot be the same as your previous password. Please choose a different password.',
+          statusCode: 400,
+        });
+      }
+    }
+
     // Update password
     const salt = await bcrypt.genSalt(12);
     user.password = await bcrypt.hash(password, salt);
@@ -500,7 +511,7 @@ const resetPassword = async (req, res, next) => {
 const changePassword = async (req, res, next) => {
   try {
     const { currentPassword, newPassword } = req.body;
-    const userId = req.user?.userId;
+    const userId = req.user?._id || req.user?.id || req.user?.userId;
 
     if (!userId) {
       return error(res, { message: 'Authentication required.', statusCode: 401 });
@@ -539,6 +550,14 @@ const changePassword = async (req, res, next) => {
     const isMatch = await bcrypt.compare(currentPassword, user.password);
     if (!isMatch) {
       return error(res, { message: 'Current password is incorrect. Please try again.', statusCode: 400 });
+    }
+
+    // Reuse prevention: Prevent setting new password identical to current password
+    if (newPassword === currentPassword) {
+      return error(res, {
+        message: 'New password cannot be the same as your current password. Please choose a different password.',
+        statusCode: 400,
+      });
     }
 
     // Update password
