@@ -2,16 +2,11 @@
 
 const webpush = require('web-push');
 
-const VAPID_PUBLIC_KEY =
-  process.env.VAPID_PUBLIC_KEY ||
-  'BJtNfTOCYyS3mywZ4xCyyOV6q4IDzRTVkiGXmQov74WuMgmACJpBrY5LuaGJQbnRplvZk5hfB9oD8RzecnKaUeM';
+const VAPID_PUBLIC_KEY = process.env.VAPID_PUBLIC_KEY
 
-const VAPID_PRIVATE_KEY =
-  process.env.VAPID_PRIVATE_KEY ||
-  'Q3soQZduVx2PyFhgThA5XLHmqTfzkrWscUpCJ-ylaPc';
+const VAPID_PRIVATE_KEY = process.env.VAPID_PRIVATE_KEY
 
-const VAPID_SUBJECT =
-  process.env.VAPID_SUBJECT || 'mailto:notifications@roofonclick.com';
+const VAPID_SUBJECT = process.env.VAPID_SUBJECT
 
 try {
   webpush.setVapidDetails(
