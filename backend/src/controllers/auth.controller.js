@@ -349,8 +349,25 @@ const googleCallback = async (req, res) => {
     const refreshToken = signRefreshToken(req.user._id.toString(), familyId);
     await storeRefreshToken(req.user._id.toString(), familyId, refreshToken);
 
+    let redirectParam = '';
+    try {
+      if (req.query.state) {
+        const rawState = req.query.state;
+        let decodedStr = '';
+        try {
+          decodedStr = Buffer.from(rawState, 'base64url').toString('utf8');
+        } catch {
+          decodedStr = Buffer.from(rawState, 'base64').toString('utf8');
+        }
+        const stateObj = JSON.parse(decodedStr);
+        if (stateObj.redirect && typeof stateObj.redirect === 'string' && stateObj.redirect.startsWith('/')) {
+          redirectParam = `&redirect=${encodeURIComponent(stateObj.redirect)}`;
+        }
+      }
+    } catch {}
+
     return res.redirect(
-      `${process.env.FRONTEND_URL}/auth/callback?accessToken=${accessToken}&refreshToken=${refreshToken}`
+      `${process.env.FRONTEND_URL}/auth/callback?accessToken=${accessToken}&refreshToken=${refreshToken}${redirectParam}`
     );
   } catch {
     return res.redirect(`${process.env.FRONTEND_URL}/auth/callback?error=oauth_failed`);

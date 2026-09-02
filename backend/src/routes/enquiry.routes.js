@@ -23,8 +23,8 @@ const enquiryValidation = [
 
 // ─── Routes ───────────────────────────────────────────────────────────────────
 
-// Public — submit enquiry (optional auth to link seeker)
-router.post('/:listingId', optionalAuth, enquiryValidation, submitEnquiry);
+// Seeker only — submit enquiry / schedule visit
+router.post('/:listingId', verifyToken, requireRole('seeker'), enquiryValidation, submitEnquiry);
 
 // Owner — view received enquiries
 router.get('/received', verifyToken, requireRole('owner', 'admin'), getReceivedEnquiries);

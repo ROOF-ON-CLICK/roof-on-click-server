@@ -28,11 +28,18 @@ if (isOAuthConfigured) {
             return done(new Error('No email returned from Google'), null);
           }
 
-          // Parse state (holds intent and role if passed)
+          // Parse state (holds intent, role, and redirect if passed)
           let state = {};
           try {
             if (req.query.state) {
-              state = JSON.parse(Buffer.from(req.query.state, 'base64').toString('utf-8'));
+              const rawState = req.query.state;
+              let decodedStr = '';
+              try {
+                decodedStr = Buffer.from(rawState, 'base64url').toString('utf8');
+              } catch {
+                decodedStr = Buffer.from(rawState, 'base64').toString('utf8');
+              }
+              state = JSON.parse(decodedStr);
             }
           } catch {
             state = {};

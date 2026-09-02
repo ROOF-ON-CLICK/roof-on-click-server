@@ -92,8 +92,9 @@ router.get(
   '/google',
   oauthGuard,
   (req, res, next) => {
-    const { intent = 'login', role = 'seeker' } = req.query;
-    const state = Buffer.from(JSON.stringify({ intent, role })).toString('base64');
+    const { intent = 'login', role = 'seeker', redirect = '' } = req.query;
+    const statePayload = JSON.stringify({ intent, role, redirect });
+    const state = Buffer.from(statePayload, 'utf8').toString('base64url');
     passport.authenticate('google', {
       scope: ['profile', 'email'],
       session: false,
