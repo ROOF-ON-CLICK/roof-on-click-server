@@ -94,7 +94,7 @@ const register = async (req, res, next) => {
       return error(res, { message: 'Validation failed', statusCode: 422, errors: errors.array() });
     }
 
-    const { name, email, password, role, phone } = req.body;
+    const { name, email, password, role, phone, gender, dob } = req.body;
 
     const existing = await User.findOne({ email: email.toLowerCase() });
     if (existing) {
@@ -112,6 +112,8 @@ const register = async (req, res, next) => {
       password: hashedPassword,
       role: allowedRole,
       phone: phone ? phone.trim() : null,
+      gender: gender ? gender.trim() : null,
+      dob: dob ? new Date(dob) : null,
       trialEndsAt,
       isTrialActive: isOwner,
     });
