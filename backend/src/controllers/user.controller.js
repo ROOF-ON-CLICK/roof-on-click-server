@@ -18,10 +18,12 @@ const { uploadBase64ToR2 } = require('../utils/r2Upload');
 const updateProfile = async (req, res, next) => {
   try {
     // Only allow updating safe fields
-    const { name, phone, avatar } = req.body;
+    const { name, phone, avatar, gender, dob } = req.body;
     const updates = {};
     if (name !== undefined) updates.name = name;
     if (phone !== undefined) updates.phone = phone;
+    if (gender !== undefined) updates.gender = gender;
+    if (dob !== undefined) updates.dob = dob;
     if (avatar !== undefined) {
       if (avatar && avatar.startsWith('data:image/')) {
         updates.avatar = await uploadBase64ToR2(avatar, `avatars/${req.user._id}`);

@@ -50,6 +50,11 @@ const registerValidation = [
     .withMessage('Mobile number is required')
     .matches(/^[6-9]\d{9}$|^\+?[1-9]\d{9,14}$/)
     .withMessage('Please enter a valid 10-digit mobile number'),
+  body('gender')
+    .optional()
+    .trim(),
+  body('dob')
+    .optional(),
 ];
 
 const loginValidation = [
