@@ -26,6 +26,7 @@ const getListings = async (req, res, next) => {
       limit = 12,
       sort = 'newest',
       q, // text search
+      all,
     } = req.query;
 
     // Build filter — always only show active listings
@@ -85,17 +86,24 @@ const getListings = async (req, res, next) => {
         break;
     }
 
+    const isAll = all === 'true' || all === true;
     const pageNum = Math.max(1, Number(page));
-    const limitNum = Math.min(50, Math.max(1, Number(limit)));
-    const skip = (pageNum - 1) * limitNum;
+    const limitNum = isAll ? 1000 : Math.min(1000, Math.max(1, Number(limit)));
+    const skip = isAll ? 0 : (pageNum - 1) * limitNum;
+
+    let query = Listing.find(filter)
+      .sort(sortObj)
+      .populate('owner', 'name avatar phone')
+      .lean();
+
+    if (!isAll) {
+      query = query.skip(skip).limit(limitNum);
+    } else {
+      query = query.limit(limitNum);
+    }
 
     const [listings, total] = await Promise.all([
-      Listing.find(filter)
-        .sort(sortObj)
-        .skip(skip)
-        .limit(limitNum)
-        .populate('owner', 'name avatar phone')
-        .lean(),
+      query,
       Listing.countDocuments(filter),
     ]);
 
@@ -122,9 +130,9 @@ const getListings = async (req, res, next) => {
       data: { listings },
       pagination: {
         total,
-        page: pageNum,
-        limit: limitNum,
-        totalPages: Math.ceil(total / limitNum),
+        page: isAll ? 1 : pageNum,
+        limit: isAll ? total : limitNum,
+        totalPages: isAll ? 1 : Math.ceil(total / limitNum),
       },
     });
   } catch (err) {

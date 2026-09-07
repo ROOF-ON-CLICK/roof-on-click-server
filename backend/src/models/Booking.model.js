@@ -77,7 +77,6 @@ const bookingSchema = new mongoose.Schema(
   }
 );
 
-bookingSchema.index({ reservationId: 1 });
 bookingSchema.index({ property: 1 });
 bookingSchema.index({ user: 1 });
 
