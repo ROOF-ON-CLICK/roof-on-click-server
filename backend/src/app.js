@@ -32,8 +32,9 @@ const corsOptions = {
   origin: [
     'https://www.roofonclick.com',
     'https://roofonclick.com',
+    'https://dev.roofonclick.com',
     'http://localhost:8001',
-  ], // Allow all origins by dynamically reflecting the request origin (supports credentials)
+  ],
   credentials: true,
   methods: '*',
   allowedHeaders: '*',
@@ -64,7 +65,7 @@ app.use(passport.initialize());
 
 // ─── Health Check ─────────────────────────────────────────────────────────────
 app.get('/api/health', (req, res) => {
-  res.json({ success: true, message: 'RoofOnClick API is running 🏠', timestamp: new Date() });
+  res.json({ success: true, message: 'RoofOnClick API is running', timestamp: new Date() });
 });
 
 // ─── Swagger UI ───────────────────────────────────────────────────────────────
