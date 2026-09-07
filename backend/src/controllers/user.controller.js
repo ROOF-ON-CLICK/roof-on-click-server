@@ -179,21 +179,29 @@ const clearSearchHistory = async (req, res, next) => {
 // ─── GET /api/users/my-listings ──────────────────────────────────────────────
 const getMyListings = async (req, res, next) => {
   try {
-    const { page = 1, limit = 12, status } = req.query;
+    const { page, limit, status, all } = req.query;
 
     const filter = { owner: req.user._id };
-    if (status) {
+    if (status && status !== 'ALL') {
       filter.status = status;
     } else {
       filter.status = { $ne: 'deleted' }; // exclude deleted by default
     }
 
-    const pageNum = Math.max(1, Number(page));
-    const limitNum = Math.min(50, Number(limit));
-    const skip = (pageNum - 1) * limitNum;
+    const isAll = all === 'true' || all === true || limit === 'all' || limit === '0' || (!page && !limit);
+    const pageNum = Math.max(1, Number(page) || 1);
+    const limitNum = isAll ? 1000 : Math.min(1000, Math.max(1, Number(limit) || 12));
+    const skip = isAll ? 0 : (pageNum - 1) * limitNum;
+
+    let query = Listing.find(filter).sort({ createdAt: -1 }).lean();
+    if (!isAll) {
+      query = query.skip(skip).limit(limitNum);
+    } else {
+      query = query.limit(limitNum);
+    }
 
     const [listings, total] = await Promise.all([
-      Listing.find(filter).sort({ createdAt: -1 }).skip(skip).limit(limitNum).lean(),
+      query,
       Listing.countDocuments(filter),
     ]);
 
@@ -202,9 +210,9 @@ const getMyListings = async (req, res, next) => {
       data: { listings },
       pagination: {
         total,
-        page: pageNum,
-        limit: limitNum,
-        totalPages: Math.ceil(total / limitNum),
+        page: isAll ? 1 : pageNum,
+        limit: isAll ? total : limitNum,
+        totalPages: isAll ? 1 : Math.ceil(total / limitNum),
       },
     });
   } catch (err) {
