@@ -5,11 +5,13 @@ const {
   getInventory,
   addOrUpdateRoom,
   getTenants,
+  getTenantById,
   addTenant,
   updateTenant,
   deleteTenant,
   getLedger,
   recordPayment,
+  getPaymentHistory,
   getFinancialAnalytics,
 } = require('../controllers/crm.controller');
 
@@ -27,12 +29,14 @@ router.post('/rooms', addOrUpdateRoom);
 
 // Tenant Directory & Operations
 router.get('/tenants', getTenants);
+router.get('/tenants/:id', getTenantById);
 router.post('/tenants', addTenant);
 router.put('/tenants/:id', updateTenant);
 router.delete('/tenants/:id', deleteTenant);
 
 // Rent Ledger & Payment Logs
 router.get('/ledger', getLedger);
+router.get('/payments', getPaymentHistory);
 router.post('/payments', recordPayment);
 
 // Financial Analytics
