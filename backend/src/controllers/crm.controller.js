@@ -57,6 +57,7 @@ const getPortfolioOverview = async (req, res) => {
 
     // Monthly Financials
     const expectedRent = activeTenants.reduce((sum, t) => sum + (t.monthlyRent || 0), 0);
+    const totalSecurityDeposit = activeTenants.reduce((sum, t) => sum + (t.securityDeposit || 0), 0);
 
     const paymentFilter = {
       ownerId,
@@ -85,6 +86,7 @@ const getPortfolioOverview = async (req, res) => {
           collectedRent,
           pendingDues,
           collectionRate,
+          totalSecurityDeposit,
         },
         properties: properties.map((p) => ({
           id: p._id,
@@ -185,6 +187,14 @@ const addOrUpdateRoom = async (req, res) => {
       // Adjust beds array if totalBeds changed
       const currentBeds = room.beds || [];
       const newTotal = Number(totalBeds) || 1;
+      const occupiedCount = currentBeds.filter((b) => b.status === 'Occupied' || b.status === 'Notice').length;
+      if (newTotal < occupiedCount) {
+        return error(res, {
+          message: `Cannot reduce total beds to ${newTotal} because ${occupiedCount} bed(s) are currently occupied or on notice.`,
+          statusCode: 400,
+        });
+      }
+
       if (newTotal > currentBeds.length) {
         for (let i = currentBeds.length; i < newTotal; i++) {
           currentBeds.push({
@@ -194,9 +204,19 @@ const addOrUpdateRoom = async (req, res) => {
             tenantName: '',
           });
         }
+        room.beds = currentBeds;
       } else if (newTotal < currentBeds.length) {
-        // Only slice vacant beds from the end
-        room.beds = currentBeds.slice(0, newTotal);
+        // Remove only vacant beds from the end
+        const kept = [];
+        let toRemove = currentBeds.length - newTotal;
+        for (let i = currentBeds.length - 1; i >= 0; i--) {
+          if (toRemove > 0 && currentBeds[i].status === 'Vacant') {
+            toRemove--;
+          } else {
+            kept.unshift(currentBeds[i]);
+          }
+        }
+        room.beds = kept;
       }
       room.totalBeds = newTotal;
       await room.save();
@@ -291,6 +311,8 @@ const addTenant = async (req, res) => {
       monthlyRent,
       securityDeposit = 0,
       notes = '',
+      avatar = '',
+      documents = [],
     } = req.body;
 
     if (!propertyId || !roomNumber || !name || !phone || monthlyRent === undefined) {
@@ -302,13 +324,44 @@ const addTenant = async (req, res) => {
       return error(res, { message: 'Property not found or unauthorized', statusCode: 404 });
     }
 
+    // Verify room inventory and bed availability
+    const room = await RoomInventory.findOne({ propertyId, roomNumber: String(roomNumber).trim() });
+    let chosenBed = null;
+    if (room && room.beds && room.beds.length > 0) {
+      if (bedLabel) {
+        const targetBed = room.beds.find((b) => b.label === bedLabel);
+        if (targetBed) {
+          if (targetBed.status !== 'Vacant') {
+            return error(res, {
+              message: `${bedLabel} in Room ${roomNumber} is already occupied${targetBed.tenantName ? ` by ${targetBed.tenantName}` : ''}. Please select a vacant bed.`,
+              statusCode: 400,
+            });
+          }
+          chosenBed = targetBed;
+        }
+      }
+
+      if (!chosenBed) {
+        chosenBed = room.beds.find((b) => b.status === 'Vacant');
+      }
+
+      if (!chosenBed) {
+        return error(res, {
+          message: `Room ${roomNumber} has no vacant beds available.`,
+          statusCode: 400,
+        });
+      }
+    }
+
+    const assignedBedLabel = chosenBed ? chosenBed.label : (bedLabel || 'Bed 1');
+
     // Create Tenant
     const tenant = await Tenant.create({
       ownerId,
       propertyId,
-      roomId,
+      roomId: room ? room._id : roomId,
       roomNumber: String(roomNumber).trim(),
-      bedLabel,
+      bedLabel: assignedBedLabel,
       name: String(name).trim(),
       phone: String(phone).trim(),
       email: String(email).trim(),
@@ -318,18 +371,16 @@ const addTenant = async (req, res) => {
       securityDeposit: Number(securityDeposit) || 0,
       status: 'Active',
       notes,
+      avatar: avatar || '',
+      documents: Array.isArray(documents) ? documents : [],
     });
 
     // Mark bed in RoomInventory as Occupied if room inventory exists
-    const room = await RoomInventory.findOne({ propertyId, roomNumber: String(roomNumber).trim() });
-    if (room && room.beds && room.beds.length > 0) {
-      const bed = room.beds.find((b) => b.label === bedLabel && b.status === 'Vacant') || room.beds.find((b) => b.status === 'Vacant') || room.beds[0];
-      if (bed) {
-        bed.status = 'Occupied';
-        bed.occupiedBy = tenant._id;
-        bed.tenantName = tenant.name;
-        await room.save();
-      }
+    if (room && chosenBed) {
+      chosenBed.status = 'Occupied';
+      chosenBed.occupiedBy = tenant._id;
+      chosenBed.tenantName = tenant.name;
+      await room.save();
     }
 
     // Synchronize marketplace listing availableRooms
@@ -354,7 +405,7 @@ const updateTenant = async (req, res) => {
   try {
     const ownerId = req.user._id;
     const { id } = req.params;
-    const { status, noticeDate, expectedVacateDate, monthlyRent, roomNumber, bedLabel, emergencyContact, notes, name, phone, email } = req.body;
+    const { status, noticeDate, expectedVacateDate, moveInDate, monthlyRent, securityDeposit, roomNumber, bedLabel, emergencyContact, notes, name, phone, email, avatar, documents } = req.body;
 
     const tenant = await Tenant.findOne({ _id: id, ownerId });
     if (!tenant) {
@@ -363,12 +414,53 @@ const updateTenant = async (req, res) => {
 
     const previousStatus = tenant.status;
 
+    const oldRoomNumber = tenant.roomNumber;
+    const oldBedLabel = tenant.bedLabel;
+    const targetRoomNumber = roomNumber ? String(roomNumber).trim() : oldRoomNumber;
+    const targetBedLabel = bedLabel || oldBedLabel;
+    const isRoomOrBedChanged = (roomNumber && targetRoomNumber !== oldRoomNumber) || (bedLabel && targetBedLabel !== oldBedLabel);
+
+    if (isRoomOrBedChanged && tenant.status !== 'Moved Out') {
+      const targetRoom = await RoomInventory.findOne({ propertyId: tenant.propertyId, roomNumber: targetRoomNumber });
+      if (targetRoom && targetRoom.beds && targetRoom.beds.length > 0) {
+        const destBed = targetRoom.beds.find((b) => b.label === targetBedLabel);
+        if (destBed && destBed.status !== 'Vacant' && String(destBed.occupiedBy) !== String(tenant._id)) {
+          return error(res, {
+            message: `${targetBedLabel} in Room ${targetRoomNumber} is already occupied.`,
+            statusCode: 400,
+          });
+        }
+        // Vacate old bed
+        const oldRoom = await RoomInventory.findOne({ propertyId: tenant.propertyId, roomNumber: oldRoomNumber });
+        if (oldRoom && oldRoom.beds) {
+          const prevBed = oldRoom.beds.find((b) => String(b.occupiedBy) === String(tenant._id));
+          if (prevBed) {
+            prevBed.status = 'Vacant';
+            prevBed.occupiedBy = null;
+            prevBed.tenantName = '';
+            await oldRoom.save();
+          }
+        }
+        // Occupy new bed
+        if (destBed) {
+          destBed.status = (status || tenant.status) === 'Notice' ? 'Notice' : 'Occupied';
+          destBed.occupiedBy = tenant._id;
+          destBed.tenantName = name ? name.trim() : tenant.name;
+          await targetRoom.save();
+        }
+      }
+    }
+
     if (name) tenant.name = name.trim();
     if (phone) tenant.phone = phone.trim();
     if (email !== undefined) tenant.email = email.trim();
+    if (avatar !== undefined) tenant.avatar = avatar;
+    if (documents !== undefined && Array.isArray(documents)) tenant.documents = documents;
     if (monthlyRent !== undefined) tenant.monthlyRent = Number(monthlyRent);
-    if (roomNumber) tenant.roomNumber = String(roomNumber).trim();
-    if (bedLabel) tenant.bedLabel = bedLabel;
+    if (securityDeposit !== undefined) tenant.securityDeposit = Number(securityDeposit);
+    if (moveInDate !== undefined) tenant.moveInDate = moveInDate;
+    if (roomNumber) tenant.roomNumber = targetRoomNumber;
+    if (bedLabel) tenant.bedLabel = targetBedLabel;
     if (emergencyContact) tenant.emergencyContact = emergencyContact;
     if (notes !== undefined) tenant.notes = notes;
 
@@ -527,6 +619,7 @@ const getLedger = async (req, res) => {
         roomNumber: tenant.roomNumber,
         bedLabel: tenant.bedLabel,
         monthlyRent,
+        securityDeposit: tenant.securityDeposit || 0,
         totalPaid,
         balanceDue,
         status,
@@ -537,6 +630,7 @@ const getLedger = async (req, res) => {
     const totalExpected = ledger.reduce((sum, l) => sum + l.monthlyRent, 0);
     const totalCollected = ledger.reduce((sum, l) => sum + l.totalPaid, 0);
     const totalPending = Math.max(0, totalExpected - totalCollected);
+    const totalSecurityDeposit = ledger.reduce((sum, l) => sum + (l.securityDeposit || 0), 0);
 
     return success(res, {
       message: 'Ledger retrieved successfully',
@@ -546,6 +640,7 @@ const getLedger = async (req, res) => {
           totalExpected,
           totalCollected,
           totalPending,
+          totalSecurityDeposit,
           paidCount: ledger.filter((l) => l.status === 'Paid').length,
           partialCount: ledger.filter((l) => l.status === 'Partial').length,
           pendingCount: ledger.filter((l) => l.status === 'Pending').length,
@@ -613,13 +708,25 @@ const getFinancialAnalytics = async (req, res) => {
     const properties = await Listing.find(propertyFilter).select('_id');
     const propertyIds = properties.map((p) => p._id);
 
-    // Compute last 6 months trend
+    // Compute monthly trend based on requested range (3, 6, 12 months, or 'ytd')
+    const rangeParam = String(req.query.range || req.query.months || '6').toLowerCase();
     const months = [];
     const now = new Date();
-    for (let i = 5; i >= 0; i--) {
-      const d = new Date(now.getFullYear(), now.getMonth() - i, 1);
-      const ym = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`;
-      months.push(ym);
+
+    if (rangeParam === 'ytd') {
+      const currentMonthIdx = now.getMonth();
+      for (let i = currentMonthIdx; i >= 0; i--) {
+        const d = new Date(now.getFullYear(), now.getMonth() - i, 1);
+        const ym = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`;
+        months.push(ym);
+      }
+    } else {
+      const monthsCount = Math.min(Math.max(parseInt(rangeParam, 10) || 6, 1), 36);
+      for (let i = monthsCount - 1; i >= 0; i--) {
+        const d = new Date(now.getFullYear(), now.getMonth() - i, 1);
+        const ym = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`;
+        months.push(ym);
+      }
     }
 
     const payments = await RentPayment.find({
@@ -676,15 +783,97 @@ const getFinancialAnalytics = async (req, res) => {
   }
 };
 
+// ─── GET /api/owner/crm/payments ────────────────────────────────────────────
+const getPaymentHistory = async (req, res) => {
+  try {
+    const ownerId = req.user._id;
+    const { propertyId, tenantId, billingMonth, paymentMode, search } = req.query;
+
+    const filter = { ownerId };
+
+    if (propertyId && propertyId !== 'ALL' && mongoose.Types.ObjectId.isValid(propertyId)) {
+      filter.propertyId = propertyId;
+    }
+    if (tenantId && mongoose.Types.ObjectId.isValid(tenantId)) {
+      filter.tenantId = tenantId;
+    }
+    if (billingMonth && billingMonth !== 'ALL') {
+      filter.billingMonth = billingMonth;
+    }
+    if (paymentMode && paymentMode !== 'ALL') {
+      filter.paymentMode = paymentMode;
+    }
+    if (search && search.trim()) {
+      const regex = new RegExp(search.trim(), 'i');
+      filter.$or = [
+        { tenantName: regex },
+        { roomNumber: regex },
+        { referenceNumber: regex },
+        { notes: regex },
+      ];
+    }
+
+    const payments = await RentPayment.find(filter)
+      .populate('propertyId', 'title')
+      .sort({ paymentDate: -1, createdAt: -1 });
+
+    const totalAmount = payments.reduce((sum, p) => sum + (p.amount || 0), 0);
+
+    return success(res, {
+      message: 'Payment history retrieved successfully',
+      data: {
+        totalAmount,
+        count: payments.length,
+        payments,
+      },
+    });
+  } catch (err) {
+    console.error('getPaymentHistory error:', err);
+    return error(res, { message: 'Failed to retrieve payment history', error: err.message });
+  }
+};
+
+// ─── GET /api/owner/crm/tenants/:id ──────────────────────────────────────────
+const getTenantById = async (req, res) => {
+  try {
+    const ownerId = req.user._id;
+    const { id } = req.params;
+
+    const tenant = await Tenant.findOne({ _id: id, ownerId }).populate('propertyId', 'title address city area images');
+    if (!tenant) {
+      return error(res, { message: 'Tenant not found or unauthorized', statusCode: 404 });
+    }
+
+    // Fetch tenant payments
+    const payments = await RentPayment.find({ tenantId: tenant._id, ownerId }).sort({ paymentDate: -1, createdAt: -1 });
+    const totalPaid = payments.reduce((sum, p) => sum + (p.amount || 0), 0);
+
+    return success(res, {
+      message: 'Tenant details retrieved successfully',
+      data: {
+        tenant,
+        payments,
+        totalPaid,
+      },
+    });
+  } catch (err) {
+    console.error('getTenantById error:', err);
+    return error(res, { message: 'Failed to retrieve tenant details', error: err.message });
+  }
+};
+
 module.exports = {
   getPortfolioOverview,
   getInventory,
   addOrUpdateRoom,
   getTenants,
+  getTenantById,
   addTenant,
   updateTenant,
   deleteTenant,
   getLedger,
   recordPayment,
+  getPaymentHistory,
   getFinancialAnalytics,
 };
+

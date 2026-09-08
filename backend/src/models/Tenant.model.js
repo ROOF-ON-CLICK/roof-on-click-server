@@ -43,6 +43,21 @@ const tenantSchema = new mongoose.Schema(
       trim: true,
       default: '',
     },
+    avatar: {
+      type: String,
+      trim: true,
+      default: '',
+    },
+    documents: [
+      {
+        name: { type: String, trim: true, required: true },
+        url: { type: String, trim: true, required: true },
+        type: { type: String, trim: true, default: 'ID Proof' },
+        key: { type: String, trim: true, default: '' },
+        size: { type: Number, default: 0 },
+        uploadedAt: { type: Date, default: Date.now },
+      },
+    ],
     emergencyContact: {
       name: { type: String, trim: true, default: '' },
       phone: { type: String, trim: true, default: '' },
