@@ -1,4 +1,5 @@
 const mongoose = require('mongoose');
+const XLSX = require('xlsx');
 const Tenant = require('../models/Tenant.model');
 const RoomInventory = require('../models/RoomInventory.model');
 const RentPayment = require('../models/RentPayment.model');
@@ -862,6 +863,469 @@ const getTenantById = async (req, res) => {
   }
 };
 
+// ─── GET /api/owner/crm/tenants/template ─────────────────────────────────────
+const downloadTenantTemplate = async (req, res) => {
+  try {
+    const { format = 'xlsx' } = req.query;
+
+    // Sheet 1: Sample & Pre-configured Data
+    const templateData = [
+      {
+        'Full Name': 'Rahul Sharma',
+        'Phone Number': '9876543210',
+        'Email': 'rahul.sharma@example.com',
+        'Room Number': '101',
+        'Bed Label': 'Bed 1',
+        'Monthly Rent': 8500,
+        'Security Deposit': 5000,
+        'Move In Date': '2026-09-01',
+        'Emergency Name': 'Suresh Sharma',
+        'Emergency Phone': '9811122233',
+        'Emergency Relation': 'Father',
+        'Notes': 'College student at DAVV',
+      },
+      {
+        'Full Name': 'Aman Verma',
+        'Phone Number': '9812345678',
+        'Email': 'aman.verma@example.com',
+        'Room Number': '101',
+        'Bed Label': 'Bed 2',
+        'Monthly Rent': 8500,
+        'Security Deposit': 5000,
+        'Move In Date': '2026-09-05',
+        'Emergency Name': 'Kailash Verma',
+        'Emergency Phone': '9822233344',
+        'Emergency Relation': 'Father',
+        'Notes': 'Working professional',
+      },
+      {
+        'Full Name': 'Pooja Patel',
+        'Phone Number': '9988776655',
+        'Email': 'pooja.p@example.com',
+        'Room Number': '102',
+        'Bed Label': 'Bed 1',
+        'Monthly Rent': 12000,
+        'Security Deposit': 10000,
+        'Move In Date': '2026-09-10',
+        'Emergency Name': 'Meena Patel',
+        'Emergency Phone': '9876501234',
+        'Emergency Relation': 'Mother',
+        'Notes': 'Single occupancy room',
+      },
+    ];
+
+    // Sheet 2: Guidelines & Instructions
+    const instructionData = [
+      {
+        'Field Name': 'Full Name',
+        'Required': 'YES',
+        'Rules & Format': 'Full legal name of the rentee. Minimum 2 characters.',
+        'Example': 'Rahul Sharma',
+      },
+      {
+        'Field Name': 'Phone Number',
+        'Required': 'YES',
+        'Rules & Format': '10-digit Indian mobile number. Do not include +91 or spaces. Must be unique per rentee.',
+        'Example': '9876543210',
+      },
+      {
+        'Field Name': 'Email',
+        'Required': 'NO',
+        'Rules & Format': 'Valid email address. Optional.',
+        'Example': 'rahul.sharma@example.com',
+      },
+      {
+        'Field Name': 'Room Number',
+        'Required': 'YES',
+        'Rules & Format': 'Room number matching your property layout. E.g., 101, 102, G-01.',
+        'Example': '101',
+      },
+      {
+        'Field Name': 'Bed Label',
+        'Required': 'YES (STRICT)',
+        'Rules & Format': 'Identification label for the bed (e.g., Bed 1, Bed 2). FOR SINGLE OCCUPANCY / 1-BED ROOMS, YOU MUST STILL ENTER "Bed 1".',
+        'Example': 'Bed 1',
+      },
+      {
+        'Field Name': 'Monthly Rent',
+        'Required': 'YES',
+        'Rules & Format': 'Agreed monthly rent amount in INR as a positive number. Do not add currency signs or commas.',
+        'Example': '8500',
+      },
+      {
+        'Field Name': 'Security Deposit',
+        'Required': 'NO',
+        'Rules & Format': 'Deposit amount paid in INR. Defaults to 0 if empty.',
+        'Example': '5000',
+      },
+      {
+        'Field Name': 'Move In Date',
+        'Required': 'NO',
+        'Rules & Format': 'Date of onboarding. Format: YYYY-MM-DD or DD-MM-YYYY. Defaults to today if omitted.',
+        'Example': '2026-09-01',
+      },
+      {
+        'Field Name': 'Emergency Name',
+        'Required': 'NO',
+        'Rules & Format': 'Name of emergency contact person.',
+        'Example': 'Suresh Sharma',
+      },
+      {
+        'Field Name': 'Emergency Phone',
+        'Required': 'NO',
+        'Rules & Format': '10-digit phone number of emergency contact.',
+        'Example': '9811122233',
+      },
+      {
+        'Field Name': 'Emergency Relation',
+        'Required': 'NO',
+        'Rules & Format': 'Relationship (e.g., Father, Mother, Guardian, Friend).',
+        'Example': 'Father',
+      },
+      {
+        'Field Name': 'Notes',
+        'Required': 'NO',
+        'Rules & Format': 'Any special notes, organization name, or additional remarks.',
+        'Example': 'College student at DAVV',
+      },
+    ];
+
+    const wb = XLSX.utils.book_new();
+
+    const wsTenants = XLSX.utils.json_to_sheet(templateData);
+    wsTenants['!cols'] = [
+      { wch: 20 }, // Full Name
+      { wch: 15 }, // Phone Number
+      { wch: 26 }, // Email
+      { wch: 14 }, // Room Number
+      { wch: 14 }, // Bed Label
+      { wch: 14 }, // Monthly Rent
+      { wch: 16 }, // Security Deposit
+      { wch: 14 }, // Move In Date
+      { wch: 20 }, // Emergency Name
+      { wch: 16 }, // Emergency Phone
+      { wch: 18 }, // Emergency Relation
+      { wch: 28 }, // Notes
+    ];
+
+    const wsInstructions = XLSX.utils.json_to_sheet(instructionData);
+    wsInstructions['!cols'] = [
+      { wch: 20 }, // Field Name
+      { wch: 16 }, // Required
+      { wch: 60 }, // Rules & Format
+      { wch: 25 }, // Example
+    ];
+
+    XLSX.utils.book_append_sheet(wb, wsTenants, 'Tenants');
+    XLSX.utils.book_append_sheet(wb, wsInstructions, 'Instructions & Rules');
+
+    if (String(format).toLowerCase() === 'csv') {
+      const csvContent = XLSX.utils.sheet_to_csv(wsTenants);
+      res.setHeader('Content-Type', 'text/csv');
+      res.setHeader('Content-Disposition', 'attachment; filename="rentees_upload_template.csv"');
+      return res.status(200).send(csvContent);
+    }
+
+    const buffer = XLSX.write(wb, { type: 'buffer', bookType: 'xlsx' });
+    res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+    res.setHeader('Content-Disposition', 'attachment; filename="rentees_upload_template.xlsx"');
+    return res.status(200).send(buffer);
+  } catch (err) {
+    console.error('downloadTenantTemplate error:', err);
+    return error(res, { message: 'Failed to generate spreadsheet template', error: err.message });
+  }
+};
+
+// ─── POST /api/owner/crm/tenants/bulk ─────────────────────────────────────────
+const bulkAddTenants = async (req, res) => {
+  try {
+    const ownerId = req.user._id;
+    let { propertyId, tenants, autoProvision = false } = req.body;
+
+    // Handle file upload if multipart/form-data with file was submitted
+    if (req.file) {
+      try {
+        const workbook = XLSX.read(req.file.buffer, { type: 'buffer' });
+        const sheetName = workbook.SheetNames[0];
+        const rawRows = XLSX.utils.sheet_to_json(workbook.Sheets[sheetName], { defval: '' });
+        tenants = rawRows;
+      } catch (parseErr) {
+        return error(res, { message: 'Failed to read spreadsheet file. Please check format.', statusCode: 400 });
+      }
+    }
+
+    if (!propertyId || !mongoose.Types.ObjectId.isValid(propertyId)) {
+      return error(res, { message: 'A valid propertyId is required', statusCode: 400 });
+    }
+
+    if (!Array.isArray(tenants) || tenants.length === 0) {
+      return error(res, { message: 'No rentee records provided for bulk import', statusCode: 400 });
+    }
+
+    const listing = await Listing.findOne({ _id: propertyId, owner: ownerId });
+    if (!listing) {
+      return error(res, { message: 'Property not found or unauthorized', statusCode: 404 });
+    }
+
+    // Load existing active tenants under this property to check phone collisions
+    const existingTenants = await Tenant.find({ propertyId, status: { $in: ['Active', 'Notice'] } }).select('phone roomNumber bedLabel');
+    const existingPhones = new Set(existingTenants.map((t) => String(t.phone).trim()));
+
+    // Load current room inventory
+    const rooms = await RoomInventory.find({ propertyId });
+    const roomMap = new Map();
+    rooms.forEach((r) => {
+      roomMap.set(String(r.roomNumber).trim(), r);
+    });
+
+    const successRows = [];
+    const failedRows = [];
+    const batchPhonesInPayload = new Set();
+    const batchBedKeysInPayload = new Set();
+
+    for (let index = 0; index < tenants.length; index++) {
+      const raw = tenants[index];
+      const rowNum = index + 2; // Row 1 is header in spreadsheets
+
+      // Normalize field names (support both Excel headers and JSON keys)
+      const name = String(raw['Full Name'] || raw.name || '').trim();
+      let phone = String(raw['Phone Number'] || raw.phone || '').trim().replace(/\D/g, '');
+      if (phone.length > 10 && phone.startsWith('91')) {
+        phone = phone.slice(2);
+      }
+      const email = String(raw['Email'] || raw.email || '').trim();
+      const roomNumber = String(raw['Room Number'] || raw.roomNumber || '').trim();
+      const rawBedLabel = String(raw['Bed Label'] || raw.bedLabel || '').trim();
+      const monthlyRent = Number(raw['Monthly Rent'] !== undefined ? raw['Monthly Rent'] : raw.monthlyRent);
+      const securityDeposit = Number(raw['Security Deposit'] !== undefined ? raw['Security Deposit'] : (raw.securityDeposit || 0)) || 0;
+      
+      let moveInDate = raw['Move In Date'] || raw.moveInDate;
+      let parsedDate = new Date();
+      if (moveInDate) {
+        if (typeof moveInDate === 'number') {
+          // Excel date serial number conversion
+          parsedDate = new Date(Math.round((moveInDate - 25569) * 86400 * 1000));
+        } else {
+          // Check DD-MM-YYYY or DD/MM/YYYY
+          const dmyMatch = String(moveInDate).match(/^(\d{1,2})[-/](\d{1,2})[-/](\d{4})$/);
+          if (dmyMatch) {
+            parsedDate = new Date(Number(dmyMatch[3]), Number(dmyMatch[2]) - 1, Number(dmyMatch[1]));
+          } else {
+            const parsed = new Date(moveInDate);
+            if (!isNaN(parsed.getTime())) parsedDate = parsed;
+          }
+        }
+      }
+
+      const emergencyName = String(raw['Emergency Name'] || raw.emergencyName || (raw.emergencyContact && raw.emergencyContact.name) || '').trim();
+      const emergencyPhone = String(raw['Emergency Phone'] || raw.emergencyPhone || (raw.emergencyContact && raw.emergencyContact.phone) || '').trim();
+      const emergencyRelation = String(raw['Emergency Relation'] || raw.emergencyRelation || (raw.emergencyContact && raw.emergencyContact.relation) || '').trim();
+      const notes = String(raw['Notes'] || raw.notes || '').trim();
+
+      // Field Validations
+      if (!name) {
+        failedRows.push({ row: rowNum, name: name || 'Unnamed', reason: 'Full Name is required' });
+        continue;
+      }
+
+      if (!phone || phone.length < 10) {
+        failedRows.push({ row: rowNum, name, reason: `Invalid phone number: '${raw['Phone Number'] || raw.phone || ''}'. Must be a 10-digit number.` });
+        continue;
+      }
+
+      if (isNaN(monthlyRent) || monthlyRent < 0) {
+        failedRows.push({ row: rowNum, name, reason: 'Monthly Rent must be a positive number' });
+        continue;
+      }
+
+      if (!roomNumber) {
+        failedRows.push({ row: rowNum, name, reason: 'Room Number is required' });
+        continue;
+      }
+
+      // Mandatory Bed Label Validation: Even for single-bed rooms, Bed Label is required
+      if (!rawBedLabel) {
+        failedRows.push({
+          row: rowNum,
+          name,
+          reason: 'Bed Label is required. For single occupancy rooms, enter "Bed 1".',
+        });
+        continue;
+      }
+
+      // Normalize Bed Label (e.g. "bed 1" -> "Bed 1", "1" -> "Bed 1")
+      let normalizedBedLabel = rawBedLabel;
+      if (/^\d+$/.test(rawBedLabel)) {
+        normalizedBedLabel = `Bed ${rawBedLabel}`;
+      } else if (/^bed\s*\d+$/i.test(rawBedLabel)) {
+        const numPart = rawBedLabel.replace(/\D/g, '');
+        normalizedBedLabel = `Bed ${numPart}`;
+      }
+
+      // Duplicate phone check against existing active tenants (Option A: skip with duplicate error)
+      if (existingPhones.has(phone)) {
+        failedRows.push({ row: rowNum, name, reason: `Phone number ${phone} is already registered to an active rentee in this property` });
+        continue;
+      }
+
+      // Duplicate phone check within current batch
+      if (batchPhonesInPayload.has(phone)) {
+        failedRows.push({ row: rowNum, name, reason: `Duplicate phone number ${phone} appears multiple times in the upload` });
+        continue;
+      }
+
+      // Double-booking check within current batch
+      const batchBedKey = `${roomNumber}::${normalizedBedLabel}`.toLowerCase();
+      if (batchBedKeysInPayload.has(batchBedKey)) {
+        failedRows.push({ row: rowNum, name, reason: `Room ${roomNumber} - ${normalizedBedLabel} is assigned more than once in this batch` });
+        continue;
+      }
+
+      // Room & Bed availability check in database
+      let targetRoom = roomMap.get(roomNumber);
+
+      if (!targetRoom) {
+        if (!autoProvision) {
+          failedRows.push({
+            row: rowNum,
+            name,
+            reason: `Room ${roomNumber} does not exist in property inventory. Enable 'Auto-provision missing rooms' or add room first.`,
+          });
+          continue;
+        }
+
+        // Auto-provision room
+        const beds = [
+          {
+            label: normalizedBedLabel,
+            status: 'Vacant',
+            occupiedBy: null,
+            tenantName: '',
+          },
+        ];
+
+        targetRoom = await RoomInventory.create({
+          propertyId,
+          ownerId,
+          floorNumber: 1,
+          roomNumber,
+          roomType: 'Single Room',
+          totalBeds: 1,
+          baseMonthlyRent: monthlyRent || 0,
+          attachedBathroom: true,
+          beds,
+        });
+
+        roomMap.set(roomNumber, targetRoom);
+      }
+
+      // Check if bed exists in targetRoom
+      let targetBed = targetRoom.beds.find((b) => b.label.toLowerCase() === normalizedBedLabel.toLowerCase());
+
+      if (!targetBed) {
+        if (autoProvision) {
+          // Add this bed to the room
+          targetRoom.beds.push({
+            label: normalizedBedLabel,
+            status: 'Vacant',
+            occupiedBy: null,
+            tenantName: '',
+          });
+          targetRoom.totalBeds = targetRoom.beds.length;
+          targetBed = targetRoom.beds[targetRoom.beds.length - 1];
+        } else {
+          failedRows.push({
+            row: rowNum,
+            name,
+            reason: `${normalizedBedLabel} does not exist in Room ${roomNumber}. Available beds: ${targetRoom.beds.map((b) => b.label).join(', ') || 'None'}`,
+          });
+          continue;
+        }
+      }
+
+      if (targetBed.status !== 'Vacant') {
+        failedRows.push({
+          row: rowNum,
+          name,
+          reason: `${normalizedBedLabel} in Room ${roomNumber} is already ${targetBed.status}${targetBed.tenantName ? ` (${targetBed.tenantName})` : ''}`,
+        });
+        continue;
+      }
+
+      // Validated. Create tenant record
+      try {
+        const createdTenant = await Tenant.create({
+          ownerId,
+          propertyId,
+          roomId: targetRoom._id,
+          roomNumber,
+          bedLabel: targetBed.label,
+          name,
+          phone,
+          email,
+          emergencyContact: {
+            name: emergencyName,
+            phone: emergencyPhone,
+            relation: emergencyRelation,
+          },
+          moveInDate: parsedDate,
+          monthlyRent,
+          securityDeposit,
+          status: 'Active',
+          notes,
+        });
+
+        // Update bed status in memory and persist
+        targetBed.status = 'Occupied';
+        targetBed.occupiedBy = createdTenant._id;
+        targetBed.tenantName = createdTenant.name;
+        await targetRoom.save();
+
+        // Mark phone and bed as used
+        existingPhones.add(phone);
+        batchPhonesInPayload.add(phone);
+        batchBedKeysInPayload.add(batchBedKey);
+
+        successRows.push({
+          row: rowNum,
+          tenantId: createdTenant._id,
+          name: createdTenant.name,
+          roomNumber: createdTenant.roomNumber,
+          bedLabel: createdTenant.bedLabel,
+          phone: createdTenant.phone,
+        });
+      } catch (createErr) {
+        failedRows.push({ row: rowNum, name, reason: createErr.message || 'Database error creating tenant' });
+      }
+    }
+
+    // Synchronize listing availableRooms & availableBeds
+    if (successRows.length > 0) {
+      if (listing.availableRooms > 0) {
+        listing.availableRooms = Math.max(0, listing.availableRooms - successRows.length);
+      }
+      if (listing.availableBeds > 0) {
+        listing.availableBeds = Math.max(0, listing.availableBeds - successRows.length);
+      }
+      await listing.save();
+    }
+
+    return success(res, {
+      message: `Bulk import completed: ${successRows.length} rentee(s) added, ${failedRows.length} skipped or failed`,
+      data: {
+        totalRows: tenants.length,
+        successCount: successRows.length,
+        failedCount: failedRows.length,
+        successRows,
+        errors: failedRows,
+      },
+    });
+  } catch (err) {
+    console.error('bulkAddTenants error:', err);
+    return error(res, { message: 'Failed to process bulk rentee upload', error: err.message });
+  }
+};
+
 module.exports = {
   getPortfolioOverview,
   getInventory,
@@ -871,9 +1335,12 @@ module.exports = {
   addTenant,
   updateTenant,
   deleteTenant,
+  downloadTenantTemplate,
+  bulkAddTenants,
   getLedger,
   recordPayment,
   getPaymentHistory,
   getFinancialAnalytics,
 };
+
 

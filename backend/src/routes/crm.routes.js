@@ -9,11 +9,18 @@ const {
   addTenant,
   updateTenant,
   deleteTenant,
+  downloadTenantTemplate,
+  bulkAddTenants,
   getLedger,
   recordPayment,
   getPaymentHistory,
   getFinancialAnalytics,
 } = require('../controllers/crm.controller');
+const multer = require('multer');
+const uploadExcel = multer({
+  storage: multer.memoryStorage(),
+  limits: { fileSize: 10 * 1024 * 1024 }, // 10MB limit
+});
 
 const router = express.Router();
 
@@ -28,6 +35,8 @@ router.get('/inventory', getInventory);
 router.post('/rooms', addOrUpdateRoom);
 
 // Tenant Directory & Operations
+router.get('/tenants/template', downloadTenantTemplate);
+router.post('/tenants/bulk', uploadExcel.single('file'), bulkAddTenants);
 router.get('/tenants', getTenants);
 router.get('/tenants/:id', getTenantById);
 router.post('/tenants', addTenant);
