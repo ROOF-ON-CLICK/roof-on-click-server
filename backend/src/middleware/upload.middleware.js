@@ -21,7 +21,7 @@ const multerUpload = multer({
   fileFilter,
   limits: {
     fileSize: 5 * 1024 * 1024, // 5MB per file
-    files: 10,                  // max 10 files per request
+    files: 25,                  // max 25 files per request
   },
 });
 
@@ -53,7 +53,7 @@ const uploadFileToR2 = async (file, listingId) => {
  * Sets req.uploadedPhotos = [{ url, key }, ...]
  */
 const uploadToR2 = [
-  multerUpload.array('photos', 10),
+  multerUpload.array('photos', 25),
 
   async (req, res, next) => {
     if (!req.files || req.files.length === 0) {
