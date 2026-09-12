@@ -11,7 +11,17 @@ const createBooking = async (req, res, next) => {
       return error(res, { message: 'Admins are platform overseers and cannot place tenant bookings.', statusCode: 403 });
     }
 
-    const { propertyId, propertyName, roomType, moveInDate, guestDetails, pricing } = req.body;
+    const {
+      propertyId,
+      propertyName,
+      roomType,
+      moveInDate,
+      guestDetails,
+      pricing,
+      paymentMethod,
+      paymentId,
+      paymentStatus,
+    } = req.body;
 
     if (!propertyId || !pricing) {
       return error(res, { message: 'Property ID and pricing details are required.', statusCode: 400 });
@@ -23,6 +33,8 @@ const createBooking = async (req, res, next) => {
     }
 
     const reservationId = `RES-${Math.floor(100000 + Math.random() * 900000)}`;
+    const resolvedPaymentMethod = paymentMethod === 'property' ? 'property' : 'online';
+    const resolvedPaymentStatus = paymentStatus === 'paid' ? 'paid' : (resolvedPaymentMethod === 'property' ? 'pending' : 'pending');
 
     const booking = await Booking.create({
       reservationId,
@@ -38,7 +50,10 @@ const createBooking = async (req, res, next) => {
         platformFee: pricing.platformFee || 0,
         totalDueNow: pricing.totalDueNow || (pricing.monthlyRent + (pricing.securityDeposit || 0)),
       },
-      status: 'pending',
+      status: resolvedPaymentStatus === 'paid' ? 'confirmed' : 'pending',
+      paymentStatus: resolvedPaymentStatus,
+      paymentMethod: resolvedPaymentMethod,
+      paymentId: paymentId || null,
     });
 
     // ── Notify Property Owner ──
@@ -48,8 +63,8 @@ const createBooking = async (req, res, next) => {
         sender: req.user?._id || null,
         category: 'Booking',
         type: 'booking.created',
-        title: 'New Booking Reservation Received',
-        message: `New reservation (${reservationId}) received for "${booking.propertyName}" from ${guestDetails?.fullName || 'a guest'}.`,
+        title: resolvedPaymentStatus === 'paid' ? 'New Paid Booking Reservation' : 'New Booking Reservation Received',
+        message: `New reservation (${reservationId}) received for "${booking.propertyName}" from ${guestDetails?.fullName || 'a guest'}.${resolvedPaymentMethod === 'property' ? ' (Token payment to be collected at property)' : ''}`,
         actionUrl: '/owner/dashboard',
         metadata: {
           bookingId: booking._id,
@@ -58,6 +73,8 @@ const createBooking = async (req, res, next) => {
           totalDueNow: booking.pricing.totalDueNow,
           guestName: guestDetails?.fullName,
           guestPhone: guestDetails?.phone,
+          paymentStatus: resolvedPaymentStatus,
+          paymentMethod: resolvedPaymentMethod,
         },
       });
     }
@@ -68,20 +85,23 @@ const createBooking = async (req, res, next) => {
         recipient: req.user._id,
         category: 'Booking',
         type: 'booking.submitted',
-        title: 'Booking Request Submitted',
-        message: `Your booking reservation (${reservationId}) for "${booking.propertyName}" was submitted and is pending owner confirmation.`,
+        title: resolvedPaymentStatus === 'paid' ? 'Booking Confirmed' : 'Booking Request Submitted',
+        message: resolvedPaymentStatus === 'paid'
+          ? `Your booking reservation (${reservationId}) for "${booking.propertyName}" has been confirmed!`
+          : `Your booking reservation (${reservationId}) for "${booking.propertyName}" was submitted and is pending owner confirmation.`,
         actionUrl: '/booking',
         metadata: {
           bookingId: booking._id,
           reservationId,
           listingId: listing._id,
           propertyName: booking.propertyName,
+          paymentStatus: resolvedPaymentStatus,
         },
       });
     }
 
     return success(res, {
-      message: 'Booking reservation submitted and pending owner confirmation.',
+      message: 'Booking reservation submitted successfully.',
       data: { booking },
       statusCode: 201,
     });
@@ -106,15 +126,76 @@ const getUserBookings = async (req, res, next) => {
 // ─── GET /api/bookings/received ──────────────────────────────────────────────
 const getOwnerBookings = async (req, res, next) => {
   try {
-    const ownerListings = await Listing.find({ owner: req.user._id }).select('_id');
-    const listingIds = ownerListings.map((l) => l._id);
+    let query = {};
+    if (req.user.role !== 'admin') {
+      const ownerListings = await Listing.find({ owner: req.user._id }).select('_id');
+      const listingIds = ownerListings.map((l) => l._id);
+      query = { property: { $in: listingIds } };
+    }
 
-    const bookings = await Booking.find({ property: { $in: listingIds } })
-      .populate('property', 'title address')
+    const bookings = await Booking.find(query)
+      .populate('property', 'title address photos')
       .populate('user', 'name email phone')
       .sort({ createdAt: -1 });
 
-    return success(res, { message: 'Owner received bookings fetched.', data: { bookings } });
+    return success(res, { message: 'Bookings fetched successfully.', data: { bookings } });
+  } catch (err) {
+    next(err);
+  }
+};
+
+// ─── PUT /api/bookings/:id/collect-payment ────────────────────────────────────
+// Owner / Admin records offline token payment collection at property
+const markPaymentCollected = async (req, res, next) => {
+  try {
+    const { mode = 'cash', note = '' } = req.body;
+    const booking = await Booking.findById(req.params.id).populate('property', 'owner title');
+
+    if (!booking) {
+      return error(res, { message: 'Booking not found.', statusCode: 404 });
+    }
+
+    if (
+      req.user.role !== 'admin' &&
+      booking.property?.owner?.toString() !== req.user._id.toString()
+    ) {
+      return error(res, { message: 'Access denied.', statusCode: 403 });
+    }
+
+    booking.paymentStatus = 'paid';
+    booking.offlinePayment = {
+      collected: true,
+      collectedAt: new Date(),
+      collectedBy: req.user._id,
+      mode,
+      note,
+    };
+    if (booking.status === 'pending') {
+      booking.status = 'confirmed';
+    }
+    await booking.save();
+
+    // Notify tenant if user exists
+    if (booking.user) {
+      createNotification({
+        recipient: booking.user,
+        sender: req.user._id,
+        category: 'Payment',
+        type: 'payment.success',
+        title: 'Offline Token Payment Recorded',
+        message: `Your offline booking token payment for "${booking.propertyName}" was confirmed by the property owner.`,
+        actionUrl: '/booking',
+        metadata: {
+          bookingId: booking._id,
+          reservationId: booking.reservationId,
+        },
+      });
+    }
+
+    return success(res, {
+      message: 'Payment marked as collected and booking confirmed.',
+      data: { booking },
+    });
   } catch (err) {
     next(err);
   }
@@ -138,6 +219,14 @@ const updateBookingStatus = async (req, res, next) => {
       booking.property?.owner?.toString() !== req.user._id.toString()
     ) {
       return error(res, { message: 'Access denied.', statusCode: 403 });
+    }
+
+    // ── Payment Guard: Block approval if token payment is unpaid ──
+    if (status === 'confirmed' && booking.paymentStatus !== 'paid') {
+      return error(res, {
+        message: 'Cannot approve booking: Token fee (₹499) has not been paid yet. Please collect the token fee via Razorpay before confirming.',
+        statusCode: 400,
+      });
     }
 
     booking.status = status;
@@ -223,4 +312,11 @@ const cancelBooking = async (req, res, next) => {
   }
 };
 
-module.exports = { createBooking, getUserBookings, getOwnerBookings, updateBookingStatus, cancelBooking };
+module.exports = {
+  createBooking,
+  getUserBookings,
+  getOwnerBookings,
+  updateBookingStatus,
+  markPaymentCollected,
+  cancelBooking,
+};
