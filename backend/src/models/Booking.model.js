@@ -49,7 +49,34 @@ const bookingSchema = new mongoose.Schema(
     paymentStatus: {
       type: String,
       enum: ['pending', 'paid', 'failed', 'refunded'],
-      default: 'paid',
+      default: 'pending',
+    },
+    paymentMethod: {
+      type: String,
+      enum: ['online', 'property'],
+      default: 'online',
+    },
+    payment: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: 'Payment',
+      default: null,
+      index: true,
+    },
+    paymentId: {
+      type: String,
+      default: null,
+      index: true,
+    },
+    offlinePayment: {
+      collected: { type: Boolean, default: false },
+      collectedAt: { type: Date, default: null },
+      collectedBy: {
+        type: mongoose.Schema.Types.ObjectId,
+        ref: 'User',
+        default: null,
+      },
+      mode: { type: String, default: null },
+      note: { type: String, default: null },
     },
     refund: {
       status: {
