@@ -4,6 +4,8 @@ const {
   getPortfolioOverview,
   getInventory,
   addOrUpdateRoom,
+  deleteRoom,
+  deleteAllRooms,
   getTenants,
   getTenantById,
   addTenant,
@@ -33,6 +35,8 @@ router.get('/overview', getPortfolioOverview);
 // Room & Bed Inventory
 router.get('/inventory', getInventory);
 router.post('/rooms', addOrUpdateRoom);
+router.delete('/rooms/all', deleteAllRooms);
+router.delete('/rooms/:roomId', deleteRoom);
 
 // Tenant Directory & Operations
 router.get('/tenants/template', downloadTenantTemplate);
