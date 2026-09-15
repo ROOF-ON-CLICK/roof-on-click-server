@@ -178,9 +178,16 @@ const addOrUpdateRoom = async (req, res) => {
 
     let room = await RoomInventory.findOne({ propertyId, roomNumber: String(roomNumber).trim() });
 
+    const parsedFloor =
+      floorNumber !== undefined && floorNumber !== null && !isNaN(Number(floorNumber))
+        ? Number(floorNumber)
+        : String(roomNumber).trim().toUpperCase().startsWith('G')
+        ? 0
+        : 1;
+
     if (room) {
       // Update existing room
-      room.floorNumber = floorNumber;
+      room.floorNumber = parsedFloor;
       room.roomType = cleanRoomType;
       room.baseMonthlyRent = baseMonthlyRent;
       room.attachedBathroom = attachedBathroom;
@@ -237,7 +244,7 @@ const addOrUpdateRoom = async (req, res) => {
       room = await RoomInventory.create({
         propertyId,
         ownerId,
-        floorNumber: Number(floorNumber) || 1,
+        floorNumber: parsedFloor,
         roomNumber: String(roomNumber).trim(),
         roomType: cleanRoomType,
         totalBeds: numBeds,
@@ -260,6 +267,134 @@ const addOrUpdateRoom = async (req, res) => {
   } catch (err) {
     console.error('addOrUpdateRoom error:', err);
     return error(res, { message: 'Failed to save room inventory', error: err.message });
+  }
+};
+
+// ─── DELETE /api/owner/crm/rooms/:roomId ───────────────────────────────────────
+const deleteRoom = async (req, res) => {
+  try {
+    const ownerId = req.user._id;
+    const { roomId } = req.params;
+    const { propertyId } = req.query;
+
+    if (!roomId) {
+      return error(res, { message: 'roomId is required', statusCode: 400 });
+    }
+
+    const room = await RoomInventory.findOne({
+      _id: roomId,
+      ownerId,
+      ...(propertyId && mongoose.Types.ObjectId.isValid(propertyId) ? { propertyId } : {}),
+    });
+
+    if (!room) {
+      return error(res, { message: 'Room not found or unauthorized', statusCode: 404 });
+    }
+
+    // Check if any occupied or notice beds exist in this room
+    const occupiedBeds = (room.beds || []).filter(
+      (b) => b.status === 'Occupied' || b.status === 'Notice'
+    );
+    if (occupiedBeds.length > 0) {
+      return error(res, {
+        message: `Cannot delete Room ${room.roomNumber} because it currently has ${occupiedBeds.length} active or notice rentee(s). Please move or vacate rentees first.`,
+        statusCode: 400,
+      });
+    }
+
+    // Double-check Tenant collection directly for active tenants assigned to this room
+    const activeTenantCount = await Tenant.countDocuments({
+      ownerId,
+      propertyId: room.propertyId,
+      roomNumber: room.roomNumber,
+      status: { $in: ['Active', 'Notice'] },
+    });
+    if (activeTenantCount > 0) {
+      return error(res, {
+        message: `Cannot delete Room ${room.roomNumber} because ${activeTenantCount} active rentee(s) are assigned to it.`,
+        statusCode: 400,
+      });
+    }
+
+    await RoomInventory.deleteOne({ _id: room._id });
+
+    // Decrement property totalRooms and availableRooms if possible
+    await Listing.findByIdAndUpdate(room.propertyId, {
+      $inc: {
+        totalRooms: -1,
+        availableRooms: -1,
+      },
+    });
+
+    return success(res, {
+      message: `Room ${room.roomNumber} deleted successfully`,
+      data: { roomId: room._id, roomNumber: room.roomNumber },
+    });
+  } catch (err) {
+    console.error('deleteRoom error:', err);
+    return error(res, { message: 'Failed to delete room', error: err.message });
+  }
+};
+
+// ─── DELETE /api/owner/crm/rooms/all ───────────────────────────────────────────
+const deleteAllRooms = async (req, res) => {
+  try {
+    const ownerId = req.user._id;
+    const propertyId = req.query.propertyId || req.body.propertyId;
+
+    if (!propertyId || !mongoose.Types.ObjectId.isValid(propertyId)) {
+      return error(res, { message: 'Valid propertyId is required', statusCode: 400 });
+    }
+
+    const listing = await Listing.findOne({ _id: propertyId, owner: ownerId });
+    if (!listing) {
+      return error(res, { message: 'Property not found or unauthorized', statusCode: 404 });
+    }
+
+    // Check if any active or notice tenants exist for this entire property
+    const activeTenants = await Tenant.find({
+      ownerId,
+      propertyId,
+      status: { $in: ['Active', 'Notice'] },
+    }).select('name roomNumber');
+
+    if (activeTenants.length > 0) {
+      return error(res, {
+        message: `Cannot delete all rooms: ${activeTenants.length} rentee(s) are currently active in this property. Please vacate all rentees first.`,
+        statusCode: 400,
+      });
+    }
+
+    // Check if any room has occupied or notice beds
+    const roomsWithOccupants = await RoomInventory.find({
+      propertyId,
+      ownerId,
+      'beds.status': { $in: ['Occupied', 'Notice'] },
+    });
+
+    if (roomsWithOccupants.length > 0) {
+      return error(res, {
+        message: `Cannot delete all rooms: ${roomsWithOccupants.length} room(s) contain occupied beds.`,
+        statusCode: 400,
+      });
+    }
+
+    const deleteResult = await RoomInventory.deleteMany({ propertyId, ownerId });
+
+    // Reset listing room counters
+    listing.totalRooms = 0;
+    listing.availableRooms = 0;
+    listing.totalBeds = 0;
+    listing.availableBeds = 0;
+    await listing.save();
+
+    return success(res, {
+      message: `Successfully deleted all ${deleteResult.deletedCount} rooms for ${listing.title}`,
+      data: { deletedCount: deleteResult.deletedCount },
+    });
+  } catch (err) {
+    console.error('deleteAllRooms error:', err);
+    return error(res, { message: 'Failed to delete all rooms', error: err.message });
   }
 };
 
@@ -384,11 +519,31 @@ const addTenant = async (req, res) => {
       await room.save();
     }
 
-    // Synchronize marketplace listing availableRooms
-    if (listing.availableRooms > 0) {
-      listing.availableRooms = Math.max(0, listing.availableRooms - 1);
-      await listing.save();
+    // Synchronize marketplace listing availableBeds & availableRooms
+    if (listing.availableBeds !== undefined && listing.availableBeds > 0) {
+      listing.availableBeds = Math.max(0, listing.availableBeds - 1);
     }
+    if (listing.availableRooms !== undefined && listing.availableRooms > 0) {
+      listing.availableRooms = Math.max(0, listing.availableRooms - 1);
+    }
+    // Also sync matching room configuration in listing.rooms if available
+    if (Array.isArray(listing.rooms) && listing.rooms.length > 0) {
+      const roomTypeClean = room ? room.roomType : '';
+      const matchedConfig = listing.rooms.find(
+        (r) => (r.sharingType && roomTypeClean && r.sharingType.toLowerCase().includes(roomTypeClean.toLowerCase())) ||
+               (r.roomType && roomTypeClean && r.roomType.toLowerCase().includes(roomTypeClean.toLowerCase()))
+      ) || listing.rooms[0];
+
+      if (matchedConfig) {
+        if (matchedConfig.availableBeds !== undefined && matchedConfig.availableBeds > 0) {
+          matchedConfig.availableBeds = Math.max(0, matchedConfig.availableBeds - 1);
+        }
+        if (matchedConfig.availableRooms !== undefined && matchedConfig.availableRooms > 0) {
+          matchedConfig.availableRooms = Math.max(0, matchedConfig.availableRooms - 1);
+        }
+      }
+    }
+    await listing.save();
 
     return success(res, {
       message: 'Rentee onboarded successfully',
@@ -497,10 +652,25 @@ const updateTenant = async (req, res) => {
           }
         }
 
-        // Increment public listing availableRooms
+        // Increment public listing availableBeds and availableRooms
         const listing = await Listing.findById(tenant.propertyId);
         if (listing) {
+          listing.availableBeds = Math.min(listing.totalBeds || 999, (listing.availableBeds || 0) + 1);
           listing.availableRooms = Math.min(listing.totalRooms || 999, (listing.availableRooms || 0) + 1);
+
+          if (Array.isArray(listing.rooms) && listing.rooms.length > 0) {
+            const roomTypeClean = room ? room.roomType : '';
+            const matchedConfig = listing.rooms.find(
+              (r) => (r.sharingType && roomTypeClean && r.sharingType.toLowerCase().includes(roomTypeClean.toLowerCase())) ||
+                     (r.roomType && roomTypeClean && r.roomType.toLowerCase().includes(roomTypeClean.toLowerCase()))
+            ) || listing.rooms[0];
+
+            if (matchedConfig) {
+              matchedConfig.availableBeds = Math.min(matchedConfig.totalBeds || 999, (matchedConfig.availableBeds || 0) + 1);
+              matchedConfig.availableRooms = Math.min(matchedConfig.totalRooms || 999, (matchedConfig.availableRooms || 0) + 1);
+            }
+          }
+
           await listing.save();
         }
       } else if (status === 'Active' && previousStatus === 'Notice') {
@@ -541,7 +711,7 @@ const deleteTenant = async (req, res) => {
       return error(res, { message: 'Tenant not found or unauthorized', statusCode: 404 });
     }
 
-    // If tenant was active or in notice, free up bed and restore availableRooms
+    // If tenant was active or in notice, free up bed and restore availableBeds & availableRooms
     if (tenant.status !== 'Moved Out') {
       const room = await RoomInventory.findOne({ propertyId: tenant.propertyId, roomNumber: tenant.roomNumber });
       if (room && room.beds) {
@@ -556,7 +726,22 @@ const deleteTenant = async (req, res) => {
 
       const listing = await Listing.findById(tenant.propertyId);
       if (listing) {
+        listing.availableBeds = Math.min(listing.totalBeds || 999, (listing.availableBeds || 0) + 1);
         listing.availableRooms = Math.min(listing.totalRooms || 999, (listing.availableRooms || 0) + 1);
+
+        if (Array.isArray(listing.rooms) && listing.rooms.length > 0) {
+          const roomTypeClean = room ? room.roomType : '';
+          const matchedConfig = listing.rooms.find(
+            (r) => (r.sharingType && roomTypeClean && r.sharingType.toLowerCase().includes(roomTypeClean.toLowerCase())) ||
+                   (r.roomType && roomTypeClean && r.roomType.toLowerCase().includes(roomTypeClean.toLowerCase()))
+          ) || listing.rooms[0];
+
+          if (matchedConfig) {
+            matchedConfig.availableBeds = Math.min(matchedConfig.totalBeds || 999, (matchedConfig.availableBeds || 0) + 1);
+            matchedConfig.availableRooms = Math.min(matchedConfig.totalRooms || 999, (matchedConfig.availableRooms || 0) + 1);
+          }
+        }
+
         await listing.save();
       }
     }
@@ -1185,62 +1370,24 @@ const bulkAddTenants = async (req, res) => {
       let targetRoom = roomMap.get(roomNumber);
 
       if (!targetRoom) {
-        if (!autoProvision) {
-          failedRows.push({
-            row: rowNum,
-            name,
-            reason: `Room ${roomNumber} does not exist in property inventory. Enable 'Auto-provision missing rooms' or add room first.`,
-          });
-          continue;
-        }
-
-        // Auto-provision room
-        const beds = [
-          {
-            label: normalizedBedLabel,
-            status: 'Vacant',
-            occupiedBy: null,
-            tenantName: '',
-          },
-        ];
-
-        targetRoom = await RoomInventory.create({
-          propertyId,
-          ownerId,
-          floorNumber: 1,
-          roomNumber,
-          roomType: 'Single Room',
-          totalBeds: 1,
-          baseMonthlyRent: monthlyRent || 0,
-          attachedBathroom: true,
-          beds,
+        failedRows.push({
+          row: rowNum,
+          name,
+          reason: `Room ${roomNumber} does not exist in property inventory. Please configure rooms before uploading rentees.`,
         });
-
-        roomMap.set(roomNumber, targetRoom);
+        continue;
       }
 
       // Check if bed exists in targetRoom
       let targetBed = targetRoom.beds.find((b) => b.label.toLowerCase() === normalizedBedLabel.toLowerCase());
 
       if (!targetBed) {
-        if (autoProvision) {
-          // Add this bed to the room
-          targetRoom.beds.push({
-            label: normalizedBedLabel,
-            status: 'Vacant',
-            occupiedBy: null,
-            tenantName: '',
-          });
-          targetRoom.totalBeds = targetRoom.beds.length;
-          targetBed = targetRoom.beds[targetRoom.beds.length - 1];
-        } else {
-          failedRows.push({
-            row: rowNum,
-            name,
-            reason: `${normalizedBedLabel} does not exist in Room ${roomNumber}. Available beds: ${targetRoom.beds.map((b) => b.label).join(', ') || 'None'}`,
-          });
-          continue;
-        }
+        failedRows.push({
+          row: rowNum,
+          name,
+          reason: `${normalizedBedLabel} does not exist in Room ${roomNumber}. Available beds: ${targetRoom.beds.map((b) => b.label).join(', ') || 'None'}`,
+        });
+        continue;
       }
 
       if (targetBed.status !== 'Vacant') {
@@ -1330,6 +1477,8 @@ module.exports = {
   getPortfolioOverview,
   getInventory,
   addOrUpdateRoom,
+  deleteRoom,
+  deleteAllRooms,
   getTenants,
   getTenantById,
   addTenant,
