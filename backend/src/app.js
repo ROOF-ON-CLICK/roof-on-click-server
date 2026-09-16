@@ -17,6 +17,7 @@ const reviewRoutes = require('./routes/review.routes');
 const uploadRoutes = require('./routes/upload.routes');
 const notificationRoutes = require('./routes/notification.routes');
 const paymentRoutes = require('./routes/payment.routes');
+const crmRoutes = require('./routes/crm.routes');
 
 // Middleware imports
 const errorHandler = require('./middleware/errorHandler.middleware');
@@ -31,8 +32,9 @@ const corsOptions = {
   origin: [
     'https://www.roofonclick.com',
     'https://roofonclick.com',
+    'https://dev.roofonclick.com',
     'http://localhost:8001',
-  ], // Allow all origins by dynamically reflecting the request origin (supports credentials)
+  ],
   credentials: true,
   methods: '*',
   allowedHeaders: '*',
@@ -55,7 +57,14 @@ app.use(
 app.use(morgan(process.env.NODE_ENV === 'production' ? 'combined' : 'dev'));
 
 // ─── Body Parsing ─────────────────────────────────────────────────────────────
-app.use(express.json({ limit: '10mb' }));
+app.use(
+  express.json({
+    limit: '10mb',
+    verify: (req, res, buf) => {
+      req.rawBody = buf;
+    },
+  })
+);
 app.use(express.urlencoded({ extended: true }));
 
 // ─── Passport ─────────────────────────────────────────────────────────────────
@@ -63,7 +72,7 @@ app.use(passport.initialize());
 
 // ─── Health Check ─────────────────────────────────────────────────────────────
 app.get('/api/health', (req, res) => {
-  res.json({ success: true, message: 'RoofOnClick API is running 🏠', timestamp: new Date() });
+  res.json({ success: true, message: 'RoofOnClick API is running', timestamp: new Date() });
 });
 
 // ─── Swagger UI ───────────────────────────────────────────────────────────────
@@ -89,6 +98,7 @@ app.use('/api/reviews', reviewRoutes);
 app.use('/api/upload', uploadRoutes);
 app.use('/api/notifications', notificationRoutes);
 app.use('/api/payments', paymentRoutes);
+app.use('/api/owner/crm', crmRoutes);
 
 // ─── 404 Handler ──────────────────────────────────────────────────────────────
 app.use((req, res) => {

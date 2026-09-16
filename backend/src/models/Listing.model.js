@@ -121,6 +121,8 @@ const listingSchema = new mongoose.Schema(
         securityDeposit: { type: Number },
         totalRooms: { type: Number },
         availableRooms: { type: Number },
+        totalBeds: { type: Number },
+        availableBeds: { type: Number },
         attachedBathroom: { type: Boolean, default: true },
         furnished: { type: String, default: 'Fully Furnished' },
       },
@@ -146,6 +148,30 @@ const listingSchema = new mongoose.Schema(
       liftAvailable: { type: Boolean },
       powerBackup: { type: Boolean },
       security: { type: Boolean },
+    },
+    totalFloors: {
+      type: Number,
+      default: 1,
+      min: [1, 'Total floors must be at least 1'],
+    },
+    hasGroundFloor: {
+      type: Boolean,
+      default: false,
+    },
+    roomsPerFloor: {
+      type: Number,
+      default: 4,
+      min: [1, 'Must have at least 1 room per floor'],
+    },
+    totalBeds: {
+      type: Number,
+      default: 0,
+      min: 0,
+    },
+    availableBeds: {
+      type: Number,
+      default: 0,
+      min: 0,
     },
     availableFrom: {
       type: Date,

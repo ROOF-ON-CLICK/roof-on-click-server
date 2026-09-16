@@ -21,7 +21,7 @@ const multerUpload = multer({
   fileFilter,
   limits: {
     fileSize: 5 * 1024 * 1024, // 5MB per file
-    files: 10,                  // max 10 files per request
+    files: 25,                  // max 25 files per request
   },
 });
 
@@ -53,7 +53,7 @@ const uploadFileToR2 = async (file, listingId) => {
  * Sets req.uploadedPhotos = [{ url, key }, ...]
  */
 const uploadToR2 = [
-  multerUpload.array('photos', 10),
+  multerUpload.array('photos', 25),
 
   async (req, res, next) => {
     if (!req.files || req.files.length === 0) {
@@ -134,4 +134,72 @@ const uploadSingleToR2 = (req, res, next) => {
   });
 };
 
-module.exports = { uploadToR2, uploadSingleToR2 };
+// ─── Single PDF Document R2 Upload Middleware ────────────────────────────────
+const pdfFileFilter = (req, file, cb) => {
+  if (file.mimetype === 'application/pdf' || file.originalname.toLowerCase().endsWith('.pdf')) {
+    cb(null, true);
+  } else {
+    cb(new Error('Only PDF documents are allowed.'), false);
+  }
+};
+
+const singlePdfUpload = multer({
+  storage,
+  fileFilter: pdfFileFilter,
+  limits: {
+    fileSize: 10 * 1024 * 1024, // 10MB limit
+  },
+}).single('document');
+
+/**
+ * uploadPdfToR2 — handles single 'document' field upload with 10MB PDF validation.
+ * Sets req.uploadedDocument = { url, key, name, size }
+ */
+const uploadPdfToR2 = (req, res, next) => {
+  singlePdfUpload(req, res, async (err) => {
+    if (err instanceof multer.MulterError) {
+      if (err.code === 'LIMIT_FILE_SIZE') {
+        return error(res, { message: 'PDF file size exceeds 10MB limit.', statusCode: 400 });
+      }
+      return error(res, { message: err.message, statusCode: 400 });
+    } else if (err) {
+      return error(res, { message: err.message || 'Invalid PDF file.', statusCode: 400 });
+    }
+
+    if (!req.file) {
+      return error(res, { message: 'No PDF document provided.', statusCode: 400 });
+    }
+
+    try {
+      const folder = req.query.folder || 'documents';
+      const userId = req.user ? req.user._id : 'public';
+      const timestamp = Date.now();
+      const sanitizedName = req.file.originalname.replace(/\s+/g, '-').replace(/[^a-zA-Z0-9._-]/g, '') || 'document.pdf';
+      const key = `uploads/${folder}/${userId}/${timestamp}-${sanitizedName}`;
+
+      await r2Client.send(
+        new PutObjectCommand({
+          Bucket: process.env.R2_BUCKET_NAME,
+          Key: key,
+          Body: req.file.buffer,
+          ContentType: 'application/pdf',
+        })
+      );
+
+      const baseUrl = process.env.R2_PUBLIC_URL || 'https://pub-7dc0dca4b7ab458d8e817e31f5d6b1e1.r2.dev';
+      const url = `${baseUrl}/${key}`;
+
+      req.uploadedDocument = {
+        url,
+        key,
+        name: req.file.originalname,
+        size: req.file.size,
+      };
+      next();
+    } catch (r2Err) {
+      next(r2Err);
+    }
+  });
+};
+
+module.exports = { uploadToR2, uploadSingleToR2, uploadPdfToR2 };

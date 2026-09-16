@@ -491,9 +491,9 @@ const uploadPhotos = async (req, res, next) => {
     }
 
     // Check total photo limit
-    if (listing.photos.length + req.uploadedPhotos.length > 10) {
+    if (listing.photos.length + req.uploadedPhotos.length > 25) {
       return error(res, {
-        message: `Cannot exceed 10 photos per listing. Currently has ${listing.photos.length}.`,
+        message: `Cannot exceed 25 photos per listing. Currently has ${listing.photos.length}.`,
         statusCode: 400,
       });
     }
