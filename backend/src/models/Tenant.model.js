@@ -6,13 +6,11 @@ const tenantSchema = new mongoose.Schema(
       type: mongoose.Schema.Types.ObjectId,
       ref: 'User',
       required: true,
-      index: true,
     },
     propertyId: {
       type: mongoose.Schema.Types.ObjectId,
       ref: 'Listing',
       required: true,
-      index: true,
     },
     roomId: {
       type: String,
@@ -82,7 +80,6 @@ const tenantSchema = new mongoose.Schema(
       type: String,
       enum: ['Active', 'Notice', 'Moved Out'],
       default: 'Active',
-      index: true,
     },
     noticeDate: {
       type: Date,
@@ -108,5 +105,8 @@ const tenantSchema = new mongoose.Schema(
 );
 
 tenantSchema.index({ ownerId: 1, propertyId: 1, status: 1 });
+tenantSchema.index({ propertyId: 1, status: 1 });
+tenantSchema.index({ ownerId: 1, createdAt: -1 });
+tenantSchema.index({ ownerId: 1, propertyId: 1, roomNumber: 1, status: 1 });
 
 module.exports = mongoose.model('Tenant', tenantSchema);

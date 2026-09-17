@@ -98,7 +98,6 @@ const supportTicketSchema = new mongoose.Schema(
   }
 );
 
-supportTicketSchema.index({ ticketId: 1 });
 supportTicketSchema.index({ type: 1 });
 supportTicketSchema.index({ status: 1 });
 supportTicketSchema.index({ user: 1 });

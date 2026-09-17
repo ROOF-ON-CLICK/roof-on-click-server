@@ -21,7 +21,16 @@ const updateProfile = async (req, res, next) => {
     const { name, phone, avatar, gender, dob } = req.body;
     const updates = {};
     if (name !== undefined) updates.name = name;
-    if (phone !== undefined) updates.phone = phone;
+    if (phone !== undefined) {
+      const cleanPhone = String(phone).trim().replace(/\D/g, '');
+      if (cleanPhone && !/^[6-9]\d{9}$/.test(cleanPhone)) {
+        return error(res, {
+          message: 'Please enter a valid 10-digit mobile number',
+          statusCode: 400,
+        });
+      }
+      updates.phone = cleanPhone || null;
+    }
     if (gender !== undefined) updates.gender = gender;
     if (dob !== undefined) updates.dob = dob;
     if (avatar !== undefined) {

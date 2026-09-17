@@ -27,6 +27,14 @@ const createBooking = async (req, res, next) => {
       return error(res, { message: 'Property ID and pricing details are required.', statusCode: 400 });
     }
 
+    if (guestDetails && guestDetails.phone) {
+      const cleanPhone = String(guestDetails.phone).trim().replace(/\D/g, '');
+      if (!/^[6-9]\d{9}$/.test(cleanPhone)) {
+        return error(res, { message: 'Please enter a valid 10-digit mobile number for guest details.', statusCode: 400 });
+      }
+      guestDetails.phone = cleanPhone;
+    }
+
     const listing = await Listing.findById(propertyId);
     if (!listing) {
       return error(res, { message: 'Property not found.', statusCode: 404 });
