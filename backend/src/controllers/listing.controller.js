@@ -5,6 +5,30 @@ const User = require('../models/User.model');
 const { createNotification, createBulkNotifications } = require('../services/notification.service');
 const { success, error } = require('../utils/apiResponse');
 
+// Helper to sanitize sensitive address information before returning to public client
+const sanitizeListingAddress = (listingDoc, currentUser) => {
+  if (!listingDoc) return listingDoc;
+  const isPlain = typeof listingDoc.toObject === 'function' ? listingDoc.toObject() : { ...listingDoc };
+  
+  // If currentUser is owner of this listing or an admin, keep full address
+  const ownerId = isPlain.owner?._id || isPlain.owner;
+  const isOwner = currentUser && (
+    currentUser.role === 'admin' ||
+    (ownerId && ownerId.toString() === currentUser._id?.toString())
+  );
+
+  if (!isOwner && isPlain.address) {
+    isPlain.address = {
+      area: isPlain.address.area || '',
+      city: isPlain.address.city || 'Indore',
+      landmark: isPlain.address.landmark || '',
+      // full, street, pincode, mapsLink, coordinates explicitly excluded for privacy/security
+    };
+  }
+
+  return isPlain;
+};
+
 // ─── GET /api/listings ────────────────────────────────────────────────────────
 /**
  * Browse all active listings with filters + pagination.
@@ -102,10 +126,12 @@ const getListings = async (req, res, next) => {
       query = query.limit(limitNum);
     }
 
-    const [listings, total] = await Promise.all([
+    const [rawListings, total] = await Promise.all([
       query,
       Listing.countDocuments(filter),
     ]);
+
+    const listings = (rawListings || []).map((l) => sanitizeListingAddress(l, req.user));
 
     // Save search history for authenticated users
     if (req.user) {
@@ -177,7 +203,9 @@ const getListing = async (req, res, next) => {
       });
     }
 
-    return success(res, { message: 'Listing fetched successfully.', data: { listing } });
+    const sanitizedListing = sanitizeListingAddress(listing, req.user);
+
+    return success(res, { message: 'Listing fetched successfully.', data: { listing: sanitizedListing } });
   } catch (err) {
     next(err);
   }
