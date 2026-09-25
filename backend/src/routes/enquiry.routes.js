@@ -1,6 +1,6 @@
 const express = require('express');
 const { body } = require('express-validator');
-const { verifyToken, optionalAuth, requireRole } = require('../middleware/auth.middleware');
+const { verifyToken, optionalAuth, requireRole, requireEmailVerified } = require('../middleware/auth.middleware');
 const {
   submitEnquiry,
   getReceivedEnquiries,
@@ -24,7 +24,8 @@ const enquiryValidation = [
 // ─── Routes ───────────────────────────────────────────────────────────────────
 
 // Seeker only — submit enquiry / schedule visit
-router.post('/:listingId', verifyToken, requireRole('seeker'), enquiryValidation, submitEnquiry);
+// ROO-47: seekers must verify email before reaching out to owners
+router.post('/:listingId', verifyToken, requireRole('seeker'), requireEmailVerified, enquiryValidation, submitEnquiry);
 
 // Owner — view received enquiries
 router.get('/received', verifyToken, requireRole('owner', 'admin'), getReceivedEnquiries);

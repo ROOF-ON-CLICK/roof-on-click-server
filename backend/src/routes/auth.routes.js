@@ -16,6 +16,11 @@ const {
   resetPassword,
   changePassword,
 } = require('../controllers/auth.controller');
+const {
+  verifyEmail,
+  resendVerification,
+  getVerificationStatus,
+} = require('../controllers/verification.controller');
 const { verifyToken } = require('../middleware/auth.middleware');
 
 const router = express.Router();
@@ -34,6 +39,24 @@ const resetLimiter = rateLimit({
   windowMs: 15 * 60 * 1000,
   max: 5,
   message: { success: false, message: 'Too many password reset attempts. Please try again after 15 minutes.' },
+  standardHeaders: true,
+  legacyHeaders: false,
+});
+
+// OTP guess guard — 10 tries per 15 min per IP (Redis also caps 5 attempts per code)
+const otpLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: 10,
+  message: { success: false, message: 'Too many verification attempts. Please try again after 15 minutes.' },
+  standardHeaders: true,
+  legacyHeaders: false,
+});
+
+// Resend guard — 5 per hour per IP (Redis 60s cooldown is the primary throttle)
+const resendLimiter = rateLimit({
+  windowMs: 60 * 60 * 1000,
+  max: 5,
+  message: { success: false, message: 'Too many resend requests. Please try again after an hour.' },
   standardHeaders: true,
   legacyHeaders: false,
 });
@@ -60,6 +83,15 @@ const registerValidation = [
 const loginValidation = [
   body('email').isEmail().withMessage('Valid email is required').normalizeEmail(),
   body('password').notEmpty().withMessage('Password is required'),
+];
+
+const verifyEmailValidation = [
+  body('otp')
+    .trim()
+    .notEmpty()
+    .withMessage('Verification code is required')
+    .matches(/^\d{6}$/)
+    .withMessage('Verification code must be a 6-digit number'),
 ];
 
 // ─── OAuth Guard ──────────────────────────────────────────────────────────────
@@ -91,6 +123,11 @@ router.post(
   body('refreshToken').notEmpty().withMessage('refreshToken is required'),
   refresh
 );
+
+// Email verification (ROO-47 Phase 2) — all require Auth so userId comes from JWT
+router.post('/verify-email', verifyToken, otpLimiter, verifyEmailValidation, verifyEmail);
+router.post('/resend-verification', verifyToken, resendLimiter, resendVerification);
+router.get('/verification-status', verifyToken, getVerificationStatus);
 
 // Google OAuth (guarded — returns 503 if not configured)
 router.get(
