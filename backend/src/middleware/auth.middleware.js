@@ -123,6 +123,30 @@ const requireRole = (...roles) => {
   };
 };
 
+// ─── requireEmailVerified ─────────────────────────────────────────────────────
+/**
+ * Email-verification gate (ROO-47 Phase 3).
+ * Must be used AFTER verifyToken (needs req.user).
+ * Admins bypass — platform overseers are never action-blocked.
+ * Responds 403 + machine-readable code so the frontend can redirect to /verify-email.
+ */
+const requireEmailVerified = (req, res, next) => {
+  if (!req.user) {
+    return error(res, { message: 'Authentication required.', statusCode: 401 });
+  }
+  if (req.user.role === 'admin') {
+    return next();
+  }
+  if (req.user.isEmailVerified === true) {
+    return next();
+  }
+  return error(res, {
+    message: 'Please verify your email address to continue. Check your inbox for the verification code.',
+    statusCode: 403,
+    code: 'EMAIL_NOT_VERIFIED',
+  });
+};
+
 // ─── isOwnerOf ────────────────────────────────────────────────────────────────
 /**
  * Resource ownership guard — verify authenticated user owns the resource.
@@ -150,4 +174,4 @@ const isOwnerOf = (Model, paramKey = 'id') => {
   };
 };
 
-module.exports = { verifyToken, optionalAuth, requireRole, isOwnerOf };
+module.exports = { verifyToken, optionalAuth, requireRole, requireEmailVerified, isOwnerOf };

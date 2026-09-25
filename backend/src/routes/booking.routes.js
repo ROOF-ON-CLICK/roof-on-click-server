@@ -1,5 +1,5 @@
 const express = require('express');
-const { verifyToken, optionalAuth, requireRole } = require('../middleware/auth.middleware');
+const { verifyToken, optionalAuth, requireRole, requireEmailVerified } = require('../middleware/auth.middleware');
 const {
   createBooking,
   getUserBookings,
@@ -11,7 +11,8 @@ const {
 
 const router = express.Router();
 
-router.post('/', verifyToken, requireRole('seeker'), createBooking);
+// ROO-47: seekers must verify email before booking
+router.post('/', verifyToken, requireRole('seeker'), requireEmailVerified, createBooking);
 router.get('/my-bookings', verifyToken, getUserBookings);
 router.get('/received', verifyToken, requireRole('owner', 'admin'), getOwnerBookings);
 router.put('/:id/status', verifyToken, requireRole('owner', 'admin'), updateBookingStatus);
