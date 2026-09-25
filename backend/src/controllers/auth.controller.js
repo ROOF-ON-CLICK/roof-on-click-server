@@ -2,6 +2,7 @@ const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
 const { randomUUID, createHash, randomBytes } = require('crypto');
 const { sendPasswordResetEmail, sendOAuthAccountEmail, sendWelcomeEmail } = require('../services/email.service');
+const { issueEmailOtp, getCooldownTtl } = require('../services/otp.service');
 const { createNotification } = require('../services/notification.service');
 const { validationResult } = require('express-validator');
 
@@ -71,12 +72,15 @@ const storeRefreshToken = async (userId, familyId, refreshToken) => {
 
 /**
  * Builds the public token response payload.
+ * emailVerified mirrors user.isEmailVerified so the frontend can route
+ * unverified users to the verification screen (ROO-47 Phase 2).
  */
 const buildTokenResponse = (accessToken, refreshToken, user) => ({
   accessToken,
   refreshToken,
   expiresIn: ACCESS_TTL_SECONDS,
   user,
+  emailVerified: user?.isEmailVerified === true,
 });
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -118,10 +122,27 @@ const register = async (req, res, next) => {
       isTrialActive: isOwner,
     });
 
-    // ── Welcome Email & In-App Notification ──
+    // ── Welcome Email (with verification OTP — ROO-47 Phase 1) & In-App Notification ──
+    // Response shape is unchanged: OTP delivery is a fire-and-forget side effect.
     (async () => {
       try {
-        await sendWelcomeEmail(user.email, user.name, user.role);
+        // OTP issuance is non-fatal — if Redis fails, the plain welcome mail still goes out.
+        let otp = null;
+        try {
+          otp = await issueEmailOtp(user._id.toString());
+        } catch (otpErr) {
+          console.error('[auth.controller] Failed to issue email OTP (non-fatal):', otpErr.message);
+        }
+        const mailResult = await sendWelcomeEmail(user.email, user.name, user.role, otp);
+        console.log(
+          `[auth.controller] Signup mail user=${user._id} otpIssued=${otp !== null} mailSent=${mailResult && mailResult.ok === true}`
+        );
+        // DEV-ONLY fallback (ROO-47): Resend test-mode keys reject non-owner
+        // recipients, which would make OTP testing impossible. Strictly gated
+        // to non-production — never logs codes in production.
+        if (otp && (!mailResult || mailResult.ok !== true) && process.env.NODE_ENV !== 'production') {
+          console.log(`[auth.controller] [DEV ONLY] OTP for ${user.email}: ${otp}`);
+        }
         await createNotification({
           recipient: user._id,
           category: 'System',
@@ -180,6 +201,27 @@ const login = async (req, res, next) => {
     const isMatch = await bcrypt.compare(password, user.password);
     if (!isMatch) {
       return error(res, { message: 'Incorrect password. Please try again.', statusCode: 401 });
+    }
+
+    // ── ROO-47 Phase 2: unverified login nudge ──
+    // Re-issue the verification OTP (respecting the resend cooldown) so users
+    // who missed the signup mail still get a code. Fire-and-forget: login
+    // latency and response shape (beyond the emailVerified flag) are unchanged.
+    if (!user.isEmailVerified) {
+      (async () => {
+        try {
+          const userId = user._id.toString();
+          const cooldown = await getCooldownTtl(userId, 'email');
+          if (cooldown > 0) return;
+          const otp = await issueEmailOtp(userId);
+          const mailResult = await sendWelcomeEmail(user.email, user.name, user.role, otp);
+          console.log(
+            `[auth.controller] Login nudge user=${user._id} otpIssued=${otp !== null} mailSent=${mailResult && mailResult.ok === true}`
+          );
+        } catch (nudgeErr) {
+          console.error('[auth.controller] Failed to send login verification nudge (non-fatal):', nudgeErr.message);
+        }
+      })();
     }
 
     const { token: accessToken } = signAccessToken(user);
