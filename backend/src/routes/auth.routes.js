@@ -48,7 +48,7 @@ const registerValidation = [
     .trim()
     .notEmpty()
     .withMessage('Mobile number is required')
-    .matches(/^[6-9]\d{9}$|^\+?[1-9]\d{9,14}$/)
+    .matches(/^[6-9]\d{9}$/)
     .withMessage('Please enter a valid 10-digit mobile number'),
   body('gender')
     .optional()

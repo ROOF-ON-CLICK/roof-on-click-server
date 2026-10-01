@@ -16,8 +16,8 @@ const enquiryValidation = [
     .trim()
     .notEmpty()
     .withMessage('Phone number is required')
-    .matches(/^[0-9+\-\s()]{7,15}$/)
-    .withMessage('Invalid phone number'),
+    .matches(/^[6-9]\d{9}$/)
+    .withMessage('Please enter a valid 10-digit mobile number'),
   body('message').optional().trim().isLength({ max: 500 }).withMessage('Message too long'),
 ];
 

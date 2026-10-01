@@ -6,19 +6,16 @@ const rentPaymentSchema = new mongoose.Schema(
       type: mongoose.Schema.Types.ObjectId,
       ref: 'User',
       required: true,
-      index: true,
     },
     propertyId: {
       type: mongoose.Schema.Types.ObjectId,
       ref: 'Listing',
       required: true,
-      index: true,
     },
     tenantId: {
       type: mongoose.Schema.Types.ObjectId,
       ref: 'Tenant',
       required: true,
-      index: true,
     },
     tenantName: {
       type: String,
@@ -31,7 +28,6 @@ const rentPaymentSchema = new mongoose.Schema(
     billingMonth: {
       type: String, // e.g. "2026-09" (YYYY-MM)
       required: true,
-      index: true,
     },
     amount: {
       type: Number,
@@ -70,5 +66,8 @@ const rentPaymentSchema = new mongoose.Schema(
 );
 
 rentPaymentSchema.index({ ownerId: 1, propertyId: 1, billingMonth: 1 });
+rentPaymentSchema.index({ tenantId: 1, ownerId: 1, paymentDate: -1 });
+rentPaymentSchema.index({ ownerId: 1, paymentDate: -1 });
+rentPaymentSchema.index({ ownerId: 1, billingMonth: 1 });
 
 module.exports = mongoose.model('RentPayment', rentPaymentSchema);

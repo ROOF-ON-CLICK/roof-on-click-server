@@ -14,28 +14,157 @@ const getCurrentBillingMonth = () => {
   return `${year}-${month}`;
 };
 
+// Resilient transaction executor (supports Atlas replica sets with standalone fallback)
+const runInTransaction = async (workFn) => {
+  let session = null;
+  try {
+    session = await mongoose.startSession();
+    session.startTransaction();
+    const result = await workFn(session);
+    await session.commitTransaction();
+    return result;
+  } catch (err) {
+    if (session) {
+      try {
+        await session.abortTransaction();
+      } catch (_) {}
+    }
+    // Fallback if environment is a standalone non-replica MongoDB
+    if (
+      err.message &&
+      (err.message.includes('replica set') ||
+        err.message.includes('Transaction numbers are only allowed on a replica set') ||
+        err.message.includes('Transactions are not supported'))
+    ) {
+      return await workFn(null);
+    }
+    throw err;
+  } finally {
+    if (session) {
+      await session.endSession();
+    }
+  }
+};
+
 // ─── GET /api/owner/crm/overview ─────────────────────────────────────────────
 const getPortfolioOverview = async (req, res) => {
   try {
     const ownerId = req.user._id;
     const { propertyId, billingMonth = getCurrentBillingMonth() } = req.query;
 
-    const propertyFilter = { owner: ownerId };
+    // Only approved and published ('active') properties are manageable in CRM
+    const propertyFilter = { owner: ownerId, status: 'active' };
     if (propertyId && mongoose.Types.ObjectId.isValid(propertyId)) {
       propertyFilter._id = propertyId;
     }
 
-    const properties = await Listing.find(propertyFilter).select('_id title address rent totalRooms availableRooms photos');
+    const properties = await Listing.find(propertyFilter)
+      .select('_id title address rent totalRooms availableRooms photos')
+      .lean();
+
     const propertyIds = properties.map((p) => p._id);
 
-    // Total rooms and beds from RoomInventory
-    const roomFilter = { ownerId, propertyId: { $in: propertyIds } };
-    const rooms = await RoomInventory.find(roomFilter);
+    if (propertyIds.length === 0) {
+      return success(res, {
+        message: 'Portfolio overview loaded successfully',
+        data: {
+          portfolio: {
+            totalProperties: 0,
+            totalBeds: 0,
+            occupiedBeds: 0,
+            vacantBeds: 0,
+            noticeCount: 0,
+            occupancyRate: 0,
+          },
+          financials: {
+            billingMonth,
+            expectedRent: 0,
+            collectedRent: 0,
+            pendingDues: 0,
+            collectionRate: 0,
+            totalSecurityDeposit: 0,
+          },
+          properties: [],
+        },
+      });
+    }
 
-    let totalBedsCount = 0;
-    rooms.forEach((r) => {
-      totalBedsCount += r.totalBeds || (r.beds ? r.beds.length : 1);
-    });
+    const ownerObjId = new mongoose.Types.ObjectId(ownerId);
+
+    // Concurrently execute database aggregations instead of in-memory reductions
+    const [tenantStats, paymentStats, roomStats] = await Promise.all([
+      // 1. Tenant aggregation: Occupancy, Notice count, Expected rent, Security deposits
+      Tenant.aggregate([
+        {
+          $match: {
+            ownerId: ownerObjId,
+            propertyId: { $in: propertyIds },
+            status: { $in: ['Active', 'Notice'] },
+          },
+        },
+        {
+          $group: {
+            _id: null,
+            occupiedBeds: { $sum: 1 },
+            noticeCount: {
+              $sum: { $cond: [{ $eq: ['$status', 'Notice'] }, 1, 0] },
+            },
+            expectedRent: { $sum: { $ifNull: ['$monthlyRent', 0] } },
+            totalSecurityDeposit: { $sum: { $ifNull: ['$securityDeposit', 0] } },
+          },
+        },
+      ]),
+
+      // 2. RentPayment aggregation: Total collected rent for current billing month
+      RentPayment.aggregate([
+        {
+          $match: {
+            ownerId: ownerObjId,
+            propertyId: { $in: propertyIds },
+            billingMonth,
+          },
+        },
+        {
+          $group: {
+            _id: null,
+            collectedRent: { $sum: { $ifNull: ['$amount', 0] } },
+          },
+        },
+      ]),
+
+      // 3. RoomInventory aggregation: Total beds count across portfolio
+      RoomInventory.aggregate([
+        {
+          $match: {
+            ownerId: ownerObjId,
+            propertyId: { $in: propertyIds },
+          },
+        },
+        {
+          $group: {
+            _id: null,
+            totalBeds: {
+              $sum: {
+                $cond: [
+                  { $gt: [{ $ifNull: ['$totalBeds', 0] }, 0] },
+                  '$totalBeds',
+                  { $size: { $ifNull: ['$beds', []] } },
+                ],
+              },
+            },
+          },
+        },
+      ]),
+    ]);
+
+    const tStat = tenantStats[0] || {
+      occupiedBeds: 0,
+      noticeCount: 0,
+      expectedRent: 0,
+      totalSecurityDeposit: 0,
+    };
+    const pStat = paymentStats[0] || { collectedRent: 0 };
+    let totalBedsCount = roomStats[0]?.totalBeds || 0;
 
     // Fallback: If no RoomInventory records exist yet, use properties' totalRooms
     if (totalBedsCount === 0) {
@@ -44,29 +173,14 @@ const getPortfolioOverview = async (req, res) => {
       });
     }
 
-    // Active and Notice tenants
-    const tenantFilter = { ownerId, propertyId: { $in: propertyIds } };
-    const activeTenants = await Tenant.find({
-      ...tenantFilter,
-      status: { $in: ['Active', 'Notice'] },
-    });
-
-    const occupiedBeds = activeTenants.length;
-    const noticeCount = activeTenants.filter((t) => t.status === 'Notice').length;
+    const occupiedBeds = tStat.occupiedBeds;
+    const noticeCount = tStat.noticeCount;
     const vacantBeds = Math.max(0, totalBedsCount - occupiedBeds);
     const occupancyRate = totalBedsCount > 0 ? Math.round((occupiedBeds / totalBedsCount) * 100) : 0;
 
-    // Monthly Financials
-    const expectedRent = activeTenants.reduce((sum, t) => sum + (t.monthlyRent || 0), 0);
-    const totalSecurityDeposit = activeTenants.reduce((sum, t) => sum + (t.securityDeposit || 0), 0);
-
-    const paymentFilter = {
-      ownerId,
-      propertyId: { $in: propertyIds },
-      billingMonth,
-    };
-    const payments = await RentPayment.find(paymentFilter);
-    const collectedRent = payments.reduce((sum, p) => sum + (p.amount || 0), 0);
+    const expectedRent = tStat.expectedRent;
+    const totalSecurityDeposit = tStat.totalSecurityDeposit;
+    const collectedRent = pStat.collectedRent;
     const pendingDues = Math.max(0, expectedRent - collectedRent);
     const collectionRate = expectedRent > 0 ? Math.min(100, Math.round((collectedRent / expectedRent) * 100)) : 0;
 
@@ -115,12 +229,22 @@ const getInventory = async (req, res) => {
       return error(res, { message: 'Valid propertyId is required', statusCode: 400 });
     }
 
-    const listing = await Listing.findOne({ _id: propertyId, owner: ownerId }).select('title address totalRooms availableRooms');
-    if (!listing) {
-      return error(res, { message: 'Property not found or unauthorized', statusCode: 404 });
-    }
+    // Only allow inventory access on active approved properties
+    const [listing, rooms] = await Promise.all([
+      Listing.findOne({ _id: propertyId, owner: ownerId, status: 'active' })
+        .select('title address totalRooms availableRooms')
+        .lean(),
+      RoomInventory.find({ propertyId, ownerId })
+        .sort({ floorNumber: 1, roomNumber: 1 })
+        .lean(),
+    ]);
 
-    const rooms = await RoomInventory.find({ propertyId, ownerId }).sort({ floorNumber: 1, roomNumber: 1 });
+    if (!listing) {
+      return error(res, {
+        message: 'Property not found, unauthorized, or not yet approved/published.',
+        statusCode: 404,
+      });
+    }
 
     return success(res, {
       message: 'Room inventory retrieved',
@@ -163,7 +287,15 @@ const normalizeRoomType = (raw, beds = 1) => {
 const addOrUpdateRoom = async (req, res) => {
   try {
     const ownerId = req.user._id;
-    const { propertyId, roomNumber, floorNumber = 1, roomType = 'Single Room', totalBeds = 1, baseMonthlyRent = 0, attachedBathroom = true } = req.body;
+    const {
+      propertyId,
+      roomNumber,
+      floorNumber = 1,
+      roomType = 'Single Room',
+      totalBeds = 1,
+      baseMonthlyRent = 0,
+      attachedBathroom = true,
+    } = req.body;
 
     if (!propertyId || !roomNumber) {
       return error(res, { message: 'propertyId and roomNumber are required', statusCode: 400 });
@@ -171,12 +303,18 @@ const addOrUpdateRoom = async (req, res) => {
 
     const cleanRoomType = normalizeRoomType(roomType, totalBeds);
 
-    const listing = await Listing.findOne({ _id: propertyId, owner: ownerId });
-    if (!listing) {
-      return error(res, { message: 'Property not found or unauthorized', statusCode: 404 });
-    }
+    // Only allow room management on active approved properties
+    const [listing, existingRoom] = await Promise.all([
+      Listing.findOne({ _id: propertyId, owner: ownerId, status: 'active' }).select('_id').lean(),
+      RoomInventory.findOne({ propertyId, roomNumber: String(roomNumber).trim() }),
+    ]);
 
-    let room = await RoomInventory.findOne({ propertyId, roomNumber: String(roomNumber).trim() });
+    if (!listing) {
+      return error(res, {
+        message: 'Cannot manage room inventory: Property not found, unauthorized, or not yet approved/published.',
+        statusCode: 404,
+      });
+    }
 
     const parsedFloor =
       floorNumber !== undefined && floorNumber !== null && !isNaN(Number(floorNumber))
@@ -185,17 +323,19 @@ const addOrUpdateRoom = async (req, res) => {
         ? 0
         : 1;
 
-    if (room) {
-      // Update existing room
-      room.floorNumber = parsedFloor;
-      room.roomType = cleanRoomType;
-      room.baseMonthlyRent = baseMonthlyRent;
-      room.attachedBathroom = attachedBathroom;
+    let savedRoom;
 
-      // Adjust beds array if totalBeds changed
-      const currentBeds = room.beds || [];
+    if (existingRoom) {
+      // Update existing room
+      existingRoom.floorNumber = parsedFloor;
+      existingRoom.roomType = cleanRoomType;
+      existingRoom.baseMonthlyRent = baseMonthlyRent;
+      existingRoom.attachedBathroom = attachedBathroom;
+
+      const currentBeds = existingRoom.beds || [];
       const newTotal = Number(totalBeds) || 1;
       const occupiedCount = currentBeds.filter((b) => b.status === 'Occupied' || b.status === 'Notice').length;
+
       if (newTotal < occupiedCount) {
         return error(res, {
           message: `Cannot reduce total beds to ${newTotal} because ${occupiedCount} bed(s) are currently occupied or on notice.`,
@@ -212,9 +352,8 @@ const addOrUpdateRoom = async (req, res) => {
             tenantName: '',
           });
         }
-        room.beds = currentBeds;
+        existingRoom.beds = currentBeds;
       } else if (newTotal < currentBeds.length) {
-        // Remove only vacant beds from the end
         const kept = [];
         let toRemove = currentBeds.length - newTotal;
         for (let i = currentBeds.length - 1; i >= 0; i--) {
@@ -224,12 +363,12 @@ const addOrUpdateRoom = async (req, res) => {
             kept.unshift(currentBeds[i]);
           }
         }
-        room.beds = kept;
+        existingRoom.beds = kept;
       }
-      room.totalBeds = newTotal;
-      await room.save();
+      existingRoom.totalBeds = newTotal;
+      savedRoom = await existingRoom.save();
     } else {
-      // Create new room
+      // Create new room & atomically increment listing room counters
       const beds = [];
       const numBeds = Number(totalBeds) || 1;
       for (let i = 0; i < numBeds; i++) {
@@ -241,7 +380,7 @@ const addOrUpdateRoom = async (req, res) => {
         });
       }
 
-      room = await RoomInventory.create({
+      savedRoom = await RoomInventory.create({
         propertyId,
         ownerId,
         floorNumber: parsedFloor,
@@ -253,20 +392,161 @@ const addOrUpdateRoom = async (req, res) => {
         beds,
       });
 
-      // Increment property totalRooms if needed
-      await Listing.findByIdAndUpdate(propertyId, {
-        $inc: { totalRooms: 1, availableRooms: 1 },
-      });
+      await Listing.updateOne(
+        { _id: propertyId },
+        { $inc: { totalRooms: 1, availableRooms: 1 } }
+      );
     }
 
     return success(res, {
       message: 'Room inventory saved successfully',
-      data: room,
+      data: savedRoom,
       statusCode: 201,
     });
   } catch (err) {
     console.error('addOrUpdateRoom error:', err);
     return error(res, { message: 'Failed to save room inventory', error: err.message });
+  }
+};
+
+// ─── POST /api/owner/crm/rooms/bulk ──────────────────────────────────────────
+const bulkAddOrUpdateRooms = async (req, res) => {
+  try {
+    const ownerId = req.user._id;
+    const { propertyId, rooms } = req.body;
+
+    if (!propertyId || !Array.isArray(rooms) || rooms.length === 0) {
+      return error(res, { message: 'propertyId and a non-empty rooms array are required', statusCode: 400 });
+    }
+
+    const listing = await Listing.findOne({ _id: propertyId, owner: ownerId, status: 'active' }).select('_id').lean();
+    if (!listing) {
+      return error(res, {
+        message: 'Cannot manage room inventory: Property not found, unauthorized, or not yet approved/published.',
+        statusCode: 404,
+      });
+    }
+
+    const seenNumbers = new Set();
+    const uniqueRooms = [];
+    for (const r of rooms) {
+      const num = String(r?.roomNumber || '').trim();
+      if (!num || seenNumbers.has(num)) continue;
+      seenNumbers.add(num);
+      uniqueRooms.push(r);
+    }
+
+    const roomNumbers = Array.from(seenNumbers);
+    const existingRooms = await RoomInventory.find({ propertyId, roomNumber: { $in: roomNumbers } });
+    const existingMap = new Map(existingRooms.map((r) => [r.roomNumber, r]));
+
+    const savedRooms = [];
+
+    for (const r of uniqueRooms) {
+      const roomNumber = String(r.roomNumber).trim();
+      if (!roomNumber) continue;
+
+      const numBeds = Math.max(1, Number(r.totalBeds) || (
+        r.roomType === 'Double Sharing' ? 2 :
+        r.roomType === 'Triple Sharing' ? 3 :
+        r.roomType === 'Four Sharing' ? 4 : 1
+      ));
+      const cleanRoomType = normalizeRoomType(r.roomType, numBeds);
+
+      const parsedFloor =
+        r.floorNumber !== undefined && r.floorNumber !== null && !isNaN(Number(r.floorNumber))
+          ? Number(r.floorNumber)
+          : roomNumber.toUpperCase().startsWith('G')
+          ? 0
+          : 1;
+
+      const existingRoom = existingMap.get(roomNumber);
+
+      if (existingRoom) {
+        existingRoom.floorNumber = parsedFloor;
+        existingRoom.roomType = cleanRoomType;
+        existingRoom.baseMonthlyRent = Number(r.baseMonthlyRent) || 0;
+        existingRoom.attachedBathroom = r.attachedBathroom !== undefined ? Boolean(r.attachedBathroom) : true;
+
+        const currentBeds = existingRoom.beds || [];
+        const occupiedCount = currentBeds.filter((b) => b.status === 'Occupied' || b.status === 'Notice').length;
+        const targetBeds = Math.max(numBeds, occupiedCount);
+
+        if (targetBeds > currentBeds.length) {
+          for (let i = currentBeds.length; i < targetBeds; i++) {
+            currentBeds.push({
+              label: `Bed ${i + 1}`,
+              status: 'Vacant',
+              occupiedBy: null,
+              tenantName: '',
+            });
+          }
+          existingRoom.beds = currentBeds;
+        } else if (targetBeds < currentBeds.length) {
+          const kept = [];
+          let toRemove = currentBeds.length - targetBeds;
+          for (let i = currentBeds.length - 1; i >= 0; i--) {
+            if (toRemove > 0 && currentBeds[i].status === 'Vacant') {
+              toRemove--;
+            } else {
+              kept.unshift(currentBeds[i]);
+            }
+          }
+          existingRoom.beds = kept;
+        }
+        existingRoom.totalBeds = targetBeds;
+        const saved = await existingRoom.save();
+        savedRooms.push(saved);
+      } else {
+        const beds = [];
+        for (let i = 0; i < numBeds; i++) {
+          beds.push({
+            label: `Bed ${i + 1}`,
+            status: 'Vacant',
+            occupiedBy: null,
+            tenantName: '',
+          });
+        }
+
+        const newRoom = await RoomInventory.create({
+          propertyId,
+          ownerId,
+          floorNumber: parsedFloor,
+          roomNumber,
+          roomType: cleanRoomType,
+          totalBeds: numBeds,
+          baseMonthlyRent: Number(r.baseMonthlyRent) || 0,
+          attachedBathroom: r.attachedBathroom !== undefined ? Boolean(r.attachedBathroom) : true,
+          beds,
+        });
+        savedRooms.push(newRoom);
+      }
+    }
+
+    // Recalculate listing inventory stats once
+    const allRooms = await RoomInventory.find({ propertyId }).lean();
+    let totalAvailableBeds = 0;
+    allRooms.forEach((rm) => {
+      const vacant = (rm.beds || []).filter((b) => b.status === 'Vacant').length;
+      totalAvailableBeds += vacant;
+    });
+
+    await Listing.findByIdAndUpdate(propertyId, {
+      totalRooms: allRooms.length,
+      availableRooms: totalAvailableBeds,
+    });
+
+    return success(res, {
+      message: `Successfully configured ${savedRooms.length} rooms`,
+      data: {
+        count: savedRooms.length,
+        rooms: savedRooms,
+      },
+      statusCode: 201,
+    });
+  } catch (err) {
+    console.error('bulkAddOrUpdateRooms error:', err);
+    return error(res, { message: 'Failed to bulk configure rooms', error: err.message });
   }
 };
 
@@ -285,30 +565,26 @@ const deleteRoom = async (req, res) => {
       _id: roomId,
       ownerId,
       ...(propertyId && mongoose.Types.ObjectId.isValid(propertyId) ? { propertyId } : {}),
-    });
+    }).lean();
 
     if (!room) {
       return error(res, { message: 'Room not found or unauthorized', statusCode: 404 });
     }
 
-    // Check if any occupied or notice beds exist in this room
-    const occupiedBeds = (room.beds || []).filter(
-      (b) => b.status === 'Occupied' || b.status === 'Notice'
-    );
-    if (occupiedBeds.length > 0) {
-      return error(res, {
-        message: `Cannot delete Room ${room.roomNumber} because it currently has ${occupiedBeds.length} active or notice rentee(s). Please move or vacate rentees first.`,
-        statusCode: 400,
-      });
+    // Ensure property is active
+    const listing = await Listing.findOne({ _id: room.propertyId, owner: ownerId, status: 'active' }).select('_id').lean();
+    if (!listing) {
+      return error(res, { message: 'Cannot delete room: Property must be approved and published.', statusCode: 403 });
     }
 
-    // Double-check Tenant collection directly for active tenants assigned to this room
+    // Check active rentees assigned to this room
     const activeTenantCount = await Tenant.countDocuments({
       ownerId,
       propertyId: room.propertyId,
       roomNumber: room.roomNumber,
       status: { $in: ['Active', 'Notice'] },
     });
+
     if (activeTenantCount > 0) {
       return error(res, {
         message: `Cannot delete Room ${room.roomNumber} because ${activeTenantCount} active rentee(s) are assigned to it.`,
@@ -316,14 +592,14 @@ const deleteRoom = async (req, res) => {
       });
     }
 
-    await RoomInventory.deleteOne({ _id: room._id });
-
-    // Decrement property totalRooms and availableRooms if possible
-    await Listing.findByIdAndUpdate(room.propertyId, {
-      $inc: {
-        totalRooms: -1,
-        availableRooms: -1,
-      },
+    await runInTransaction(async (session) => {
+      const opts = session ? { session } : {};
+      await RoomInventory.deleteOne({ _id: room._id }, opts);
+      await Listing.updateOne(
+        { _id: room.propertyId, totalRooms: { $gt: 0 } },
+        { $inc: { totalRooms: -1, availableRooms: -1 } },
+        opts
+      );
     });
 
     return success(res, {
@@ -346,51 +622,50 @@ const deleteAllRooms = async (req, res) => {
       return error(res, { message: 'Valid propertyId is required', statusCode: 400 });
     }
 
-    const listing = await Listing.findOne({ _id: propertyId, owner: ownerId });
+    const [listing, activeTenantExists, occupiedRoomExists] = await Promise.all([
+      Listing.findOne({ _id: propertyId, owner: ownerId, status: 'active' }).select('_id title').lean(),
+      Tenant.exists({ ownerId, propertyId, status: { $in: ['Active', 'Notice'] } }),
+      RoomInventory.exists({ propertyId, ownerId, 'beds.status': { $in: ['Occupied', 'Notice'] } }),
+    ]);
+
     if (!listing) {
-      return error(res, { message: 'Property not found or unauthorized', statusCode: 404 });
+      return error(res, {
+        message: 'Property not found, unauthorized, or not yet approved/published.',
+        statusCode: 404,
+      });
     }
 
-    // Check if any active or notice tenants exist for this entire property
-    const activeTenants = await Tenant.find({
-      ownerId,
-      propertyId,
-      status: { $in: ['Active', 'Notice'] },
-    }).select('name roomNumber');
-
-    if (activeTenants.length > 0) {
+    if (activeTenantExists) {
       return error(res, {
-        message: `Cannot delete all rooms: ${activeTenants.length} rentee(s) are currently active in this property. Please vacate all rentees first.`,
+        message: 'Cannot delete all rooms: Active rentee(s) are currently assigned to this property. Please vacate all rentees first.',
         statusCode: 400,
       });
     }
 
-    // Check if any room has occupied or notice beds
-    const roomsWithOccupants = await RoomInventory.find({
-      propertyId,
-      ownerId,
-      'beds.status': { $in: ['Occupied', 'Notice'] },
+    if (occupiedRoomExists) {
+      return error(res, {
+        message: 'Cannot delete all rooms: Some room(s) contain occupied beds.',
+        statusCode: 400,
+      });
+    }
+
+    let deletedCount = 0;
+
+    await runInTransaction(async (session) => {
+      const opts = session ? { session } : {};
+      const deleteResult = await RoomInventory.deleteMany({ propertyId, ownerId }, opts);
+      deletedCount = deleteResult.deletedCount;
+
+      await Listing.updateOne(
+        { _id: propertyId },
+        { $set: { totalRooms: 0, availableRooms: 0, totalBeds: 0, availableBeds: 0 } },
+        opts
+      );
     });
 
-    if (roomsWithOccupants.length > 0) {
-      return error(res, {
-        message: `Cannot delete all rooms: ${roomsWithOccupants.length} room(s) contain occupied beds.`,
-        statusCode: 400,
-      });
-    }
-
-    const deleteResult = await RoomInventory.deleteMany({ propertyId, ownerId });
-
-    // Reset listing room counters
-    listing.totalRooms = 0;
-    listing.availableRooms = 0;
-    listing.totalBeds = 0;
-    listing.availableBeds = 0;
-    await listing.save();
-
     return success(res, {
-      message: `Successfully deleted all ${deleteResult.deletedCount} rooms for ${listing.title}`,
-      data: { deletedCount: deleteResult.deletedCount },
+      message: `Successfully deleted all ${deletedCount} rooms for ${listing.title}`,
+      data: { deletedCount },
     });
   } catch (err) {
     console.error('deleteAllRooms error:', err);
@@ -404,10 +679,29 @@ const getTenants = async (req, res) => {
     const ownerId = req.user._id;
     const { propertyId, status, search } = req.query;
 
-    const filter = { ownerId };
-    if (propertyId && mongoose.Types.ObjectId.isValid(propertyId)) {
-      filter.propertyId = propertyId;
+    // Restrict to active approved properties
+    const activeProperties = await Listing.find({ owner: ownerId, status: 'active' }).select('_id').lean();
+    const activePropertyIds = activeProperties.map((p) => p._id);
+
+    if (activePropertyIds.length === 0) {
+      return success(res, {
+        message: 'Tenants retrieved successfully',
+        data: [],
+      });
     }
+
+    const filter = { ownerId, propertyId: { $in: activePropertyIds } };
+    if (propertyId && mongoose.Types.ObjectId.isValid(propertyId)) {
+      if (activePropertyIds.some((id) => String(id) === String(propertyId))) {
+        filter.propertyId = propertyId;
+      } else {
+        return success(res, {
+          message: 'Tenants retrieved successfully',
+          data: [],
+        });
+      }
+    }
+
     if (status && ['Active', 'Notice', 'Moved Out'].includes(status)) {
       filter.status = status;
     }
@@ -417,8 +711,10 @@ const getTenants = async (req, res) => {
     }
 
     const tenants = await Tenant.find(filter)
+      .select('-documents')
       .populate('propertyId', 'title address rent')
-      .sort({ createdAt: -1 });
+      .sort({ createdAt: -1 })
+      .lean();
 
     return success(res, {
       message: 'Tenants retrieved successfully',
@@ -452,17 +748,44 @@ const addTenant = async (req, res) => {
     } = req.body;
 
     if (!propertyId || !roomNumber || !name || !phone || monthlyRent === undefined) {
-      return error(res, { message: 'Missing required tenant fields: propertyId, roomNumber, name, phone, monthlyRent', statusCode: 400 });
+      return error(res, {
+        message: 'Missing required tenant fields: propertyId, roomNumber, name, phone, monthlyRent',
+        statusCode: 400,
+      });
     }
 
-    const listing = await Listing.findOne({ _id: propertyId, owner: ownerId });
+    const cleanPhone = String(phone).trim().replace(/\D/g, '');
+    if (!/^[6-9]\d{9}$/.test(cleanPhone)) {
+      return error(res, {
+        message: 'Please enter a valid 10-digit mobile number for the tenant',
+        statusCode: 400,
+      });
+    }
+
+    if (emergencyContact && emergencyContact.phone && emergencyContact.phone.trim()) {
+      const cleanEmerg = String(emergencyContact.phone).trim().replace(/\D/g, '');
+      if (!/^[6-9]\d{9}$/.test(cleanEmerg)) {
+        return error(res, {
+          message: 'Please enter a valid 10-digit emergency contact phone number',
+          statusCode: 400,
+        });
+      }
+    }
+
+    // Only allow tenant onboarding on active approved properties
+    const [listing, room] = await Promise.all([
+      Listing.findOne({ _id: propertyId, owner: ownerId, status: 'active' }).select('_id').lean(),
+      RoomInventory.findOne({ propertyId, roomNumber: String(roomNumber).trim() }).lean(),
+    ]);
+
     if (!listing) {
-      return error(res, { message: 'Property not found or unauthorized', statusCode: 404 });
+      return error(res, {
+        message: 'Cannot onboard rentee: Property not found, unauthorized, or not yet approved/published.',
+        statusCode: 404,
+      });
     }
 
-    // Verify room inventory and bed availability
-    const room = await RoomInventory.findOne({ propertyId, roomNumber: String(roomNumber).trim() });
-    let chosenBed = null;
+    let chosenBedLabel = bedLabel || 'Bed 1';
     if (room && room.beds && room.beds.length > 0) {
       if (bedLabel) {
         const targetBed = room.beds.find((b) => b.label === bedLabel);
@@ -473,86 +796,96 @@ const addTenant = async (req, res) => {
               statusCode: 400,
             });
           }
-          chosenBed = targetBed;
+          chosenBedLabel = targetBed.label;
         }
       }
 
-      if (!chosenBed) {
-        chosenBed = room.beds.find((b) => b.status === 'Vacant');
-      }
-
-      if (!chosenBed) {
-        return error(res, {
-          message: `Room ${roomNumber} has no vacant beds available.`,
-          statusCode: 400,
-        });
+      if (!bedLabel || !room.beds.some((b) => b.label === chosenBedLabel)) {
+        const firstVacant = room.beds.find((b) => b.status === 'Vacant');
+        if (!firstVacant) {
+          return error(res, {
+            message: `Room ${roomNumber} has no vacant beds available.`,
+            statusCode: 400,
+          });
+        }
+        chosenBedLabel = firstVacant.label;
       }
     }
 
-    const assignedBedLabel = chosenBed ? chosenBed.label : (bedLabel || 'Bed 1');
+    // Execute creation, atomic bed allocation, and listing availability update inside a transaction
+    const createdTenant = await runInTransaction(async (session) => {
+      const opts = session ? { session } : {};
 
-    // Create Tenant
-    const tenant = await Tenant.create({
-      ownerId,
-      propertyId,
-      roomId: room ? room._id : roomId,
-      roomNumber: String(roomNumber).trim(),
-      bedLabel: assignedBedLabel,
-      name: String(name).trim(),
-      phone: String(phone).trim(),
-      email: String(email).trim(),
-      emergencyContact: emergencyContact || {},
-      moveInDate,
-      monthlyRent: Number(monthlyRent),
-      securityDeposit: Number(securityDeposit) || 0,
-      status: 'Active',
-      notes,
-      avatar: avatar || '',
-      documents: Array.isArray(documents) ? documents : [],
+      const [tenant] = await Tenant.create(
+        [
+          {
+            ownerId,
+            propertyId,
+            roomId: room ? room._id : roomId,
+            roomNumber: String(roomNumber).trim(),
+            bedLabel: chosenBedLabel,
+            name: String(name).trim(),
+            phone: String(phone).trim(),
+            email: String(email).trim(),
+            emergencyContact: emergencyContact || {},
+            moveInDate,
+            monthlyRent: Number(monthlyRent),
+            securityDeposit: Number(securityDeposit) || 0,
+            status: 'Active',
+            notes,
+            avatar: avatar || '',
+            documents: Array.isArray(documents) ? documents : [],
+          },
+        ],
+        opts
+      );
+
+      if (room) {
+        const updatedRoom = await RoomInventory.findOneAndUpdate(
+          {
+            propertyId,
+            roomNumber: String(roomNumber).trim(),
+            'beds.label': chosenBedLabel,
+            'beds.status': 'Vacant',
+          },
+          {
+            $set: {
+              'beds.$.status': 'Occupied',
+              'beds.$.occupiedBy': tenant._id,
+              'beds.$.tenantName': tenant.name,
+            },
+          },
+          { ...opts, new: true }
+        );
+
+        if (!updatedRoom) {
+          const err = new Error(
+            `${chosenBedLabel} in Room ${roomNumber} was just occupied. Please select another bed.`
+          );
+          err.statusCode = 409;
+          throw err;
+        }
+      }
+
+      // Atomically decrement listing availability counters
+      await Listing.updateOne(
+        { _id: propertyId, availableBeds: { $gt: 0 } },
+        { $inc: { availableBeds: -1, availableRooms: -1 } },
+        opts
+      );
+
+      return tenant;
     });
 
-    // Mark bed in RoomInventory as Occupied if room inventory exists
-    if (room && chosenBed) {
-      chosenBed.status = 'Occupied';
-      chosenBed.occupiedBy = tenant._id;
-      chosenBed.tenantName = tenant.name;
-      await room.save();
-    }
-
-    // Synchronize marketplace listing availableBeds & availableRooms
-    if (listing.availableBeds !== undefined && listing.availableBeds > 0) {
-      listing.availableBeds = Math.max(0, listing.availableBeds - 1);
-    }
-    if (listing.availableRooms !== undefined && listing.availableRooms > 0) {
-      listing.availableRooms = Math.max(0, listing.availableRooms - 1);
-    }
-    // Also sync matching room configuration in listing.rooms if available
-    if (Array.isArray(listing.rooms) && listing.rooms.length > 0) {
-      const roomTypeClean = room ? room.roomType : '';
-      const matchedConfig = listing.rooms.find(
-        (r) => (r.sharingType && roomTypeClean && r.sharingType.toLowerCase().includes(roomTypeClean.toLowerCase())) ||
-               (r.roomType && roomTypeClean && r.roomType.toLowerCase().includes(roomTypeClean.toLowerCase()))
-      ) || listing.rooms[0];
-
-      if (matchedConfig) {
-        if (matchedConfig.availableBeds !== undefined && matchedConfig.availableBeds > 0) {
-          matchedConfig.availableBeds = Math.max(0, matchedConfig.availableBeds - 1);
-        }
-        if (matchedConfig.availableRooms !== undefined && matchedConfig.availableRooms > 0) {
-          matchedConfig.availableRooms = Math.max(0, matchedConfig.availableRooms - 1);
-        }
-      }
-    }
-    await listing.save();
 
     return success(res, {
       message: 'Rentee onboarded successfully',
-      data: tenant,
+      data: createdTenant,
       statusCode: 201,
     });
   } catch (err) {
     console.error('addTenant error:', err);
-    return error(res, { message: 'Failed to add tenant', error: err.message });
+    return error(res, { message: err.message || 'Failed to add tenant', statusCode: err.statusCode || 500 });
   }
 };
 
@@ -561,134 +894,164 @@ const updateTenant = async (req, res) => {
   try {
     const ownerId = req.user._id;
     const { id } = req.params;
-    const { status, noticeDate, expectedVacateDate, moveInDate, monthlyRent, securityDeposit, roomNumber, bedLabel, emergencyContact, notes, name, phone, email, avatar, documents } = req.body;
+    const {
+      status,
+      noticeDate,
+      expectedVacateDate,
+      moveInDate,
+      monthlyRent,
+      securityDeposit,
+      roomNumber,
+      bedLabel,
+      emergencyContact,
+      notes,
+      name,
+      phone,
+      email,
+      avatar,
+      documents,
+    } = req.body;
 
     const tenant = await Tenant.findOne({ _id: id, ownerId });
     if (!tenant) {
       return error(res, { message: 'Tenant not found or unauthorized', statusCode: 404 });
     }
 
-    const previousStatus = tenant.status;
+    if (phone) {
+      const cleanPhone = String(phone).trim().replace(/\D/g, '');
+      if (!/^[6-9]\d{9}$/.test(cleanPhone)) {
+        return error(res, {
+          message: 'Please enter a valid 10-digit mobile number for the tenant',
+          statusCode: 400,
+        });
+      }
+    }
 
+    if (emergencyContact && emergencyContact.phone && emergencyContact.phone.trim()) {
+      const cleanEmerg = String(emergencyContact.phone).trim().replace(/\D/g, '');
+      if (!/^[6-9]\d{9}$/.test(cleanEmerg)) {
+        return error(res, {
+          message: 'Please enter a valid 10-digit emergency contact phone number',
+          statusCode: 400,
+        });
+      }
+    }
+
+    // Verify property is active
+    const listing = await Listing.findOne({ _id: tenant.propertyId, owner: ownerId, status: 'active' }).select('_id').lean();
+    if (!listing) {
+      return error(res, {
+        message: 'Cannot manage tenant: Associated property is not active or approved.',
+        statusCode: 403,
+      });
+    }
+
+    const previousStatus = tenant.status;
     const oldRoomNumber = tenant.roomNumber;
     const oldBedLabel = tenant.bedLabel;
     const targetRoomNumber = roomNumber ? String(roomNumber).trim() : oldRoomNumber;
     const targetBedLabel = bedLabel || oldBedLabel;
-    const isRoomOrBedChanged = (roomNumber && targetRoomNumber !== oldRoomNumber) || (bedLabel && targetBedLabel !== oldBedLabel);
+    const isRoomOrBedChanged =
+      (roomNumber && targetRoomNumber !== oldRoomNumber) || (bedLabel && targetBedLabel !== oldBedLabel);
 
-    if (isRoomOrBedChanged && tenant.status !== 'Moved Out') {
-      const targetRoom = await RoomInventory.findOne({ propertyId: tenant.propertyId, roomNumber: targetRoomNumber });
-      if (targetRoom && targetRoom.beds && targetRoom.beds.length > 0) {
-        const destBed = targetRoom.beds.find((b) => b.label === targetBedLabel);
-        if (destBed && destBed.status !== 'Vacant' && String(destBed.occupiedBy) !== String(tenant._id)) {
-          return error(res, {
-            message: `${targetBedLabel} in Room ${targetRoomNumber} is already occupied.`,
-            statusCode: 400,
-          });
-        }
-        // Vacate old bed
-        const oldRoom = await RoomInventory.findOne({ propertyId: tenant.propertyId, roomNumber: oldRoomNumber });
-        if (oldRoom && oldRoom.beds) {
-          const prevBed = oldRoom.beds.find((b) => String(b.occupiedBy) === String(tenant._id));
-          if (prevBed) {
-            prevBed.status = 'Vacant';
-            prevBed.occupiedBy = null;
-            prevBed.tenantName = '';
-            await oldRoom.save();
-          }
-        }
-        // Occupy new bed
-        if (destBed) {
-          destBed.status = (status || tenant.status) === 'Notice' ? 'Notice' : 'Occupied';
-          destBed.occupiedBy = tenant._id;
-          destBed.tenantName = name ? name.trim() : tenant.name;
-          await targetRoom.save();
-        }
-      }
-    }
+    await runInTransaction(async (session) => {
+      const opts = session ? { session } : {};
 
-    if (name) tenant.name = name.trim();
-    if (phone) tenant.phone = phone.trim();
-    if (email !== undefined) tenant.email = email.trim();
-    if (avatar !== undefined) tenant.avatar = avatar;
-    if (documents !== undefined && Array.isArray(documents)) tenant.documents = documents;
-    if (monthlyRent !== undefined) tenant.monthlyRent = Number(monthlyRent);
-    if (securityDeposit !== undefined) tenant.securityDeposit = Number(securityDeposit);
-    if (moveInDate !== undefined) tenant.moveInDate = moveInDate;
-    if (roomNumber) tenant.roomNumber = targetRoomNumber;
-    if (bedLabel) tenant.bedLabel = targetBedLabel;
-    if (emergencyContact) tenant.emergencyContact = emergencyContact;
-    if (notes !== undefined) tenant.notes = notes;
+      // 1. Handle Room/Bed shifts atomically
+      if (isRoomOrBedChanged && tenant.status !== 'Moved Out') {
+        // Free previous bed
+        await RoomInventory.updateOne(
+          { propertyId: tenant.propertyId, roomNumber: oldRoomNumber, 'beds.occupiedBy': tenant._id },
+          { $set: { 'beds.$.status': 'Vacant', 'beds.$.occupiedBy': null, 'beds.$.tenantName': '' } },
+          opts
+        );
 
-    // Handle status changes
-    if (status && status !== previousStatus) {
-      tenant.status = status;
+        // Claim target bed
+        const claimed = await RoomInventory.findOneAndUpdate(
+          {
+            propertyId: tenant.propertyId,
+            roomNumber: targetRoomNumber,
+            'beds.label': targetBedLabel,
+            'beds.status': 'Vacant',
+          },
+          {
+            $set: {
+              'beds.$.status': (status || tenant.status) === 'Notice' ? 'Notice' : 'Occupied',
+              'beds.$.occupiedBy': tenant._id,
+              'beds.$.tenantName': name ? name.trim() : tenant.name,
+            },
+          },
+          { ...opts, new: true }
+        );
 
-      if (status === 'Notice') {
-        tenant.noticeDate = noticeDate || new Date();
-        tenant.expectedVacateDate = expectedVacateDate || null;
+        if (!claimed) {
+          const roomExists = await RoomInventory.exists({
+            propertyId: tenant.propertyId,
+            roomNumber: targetRoomNumber,
+          }, opts);
 
-        // Update bed status in RoomInventory to Notice
-        const room = await RoomInventory.findOne({ propertyId: tenant.propertyId, roomNumber: tenant.roomNumber });
-        if (room && room.beds) {
-          const bed = room.beds.find((b) => String(b.occupiedBy) === String(tenant._id));
-          if (bed) {
-            bed.status = 'Notice';
-            await room.save();
-          }
-        }
-      } else if (status === 'Moved Out') {
-        tenant.moveOutDate = new Date();
-
-        // Free up bed in RoomInventory
-        const room = await RoomInventory.findOne({ propertyId: tenant.propertyId, roomNumber: tenant.roomNumber });
-        if (room && room.beds) {
-          const bed = room.beds.find((b) => String(b.occupiedBy) === String(tenant._id));
-          if (bed) {
-            bed.status = 'Vacant';
-            bed.occupiedBy = null;
-            bed.tenantName = '';
-            await room.save();
-          }
-        }
-
-        // Increment public listing availableBeds and availableRooms
-        const listing = await Listing.findById(tenant.propertyId);
-        if (listing) {
-          listing.availableBeds = Math.min(listing.totalBeds || 999, (listing.availableBeds || 0) + 1);
-          listing.availableRooms = Math.min(listing.totalRooms || 999, (listing.availableRooms || 0) + 1);
-
-          if (Array.isArray(listing.rooms) && listing.rooms.length > 0) {
-            const roomTypeClean = room ? room.roomType : '';
-            const matchedConfig = listing.rooms.find(
-              (r) => (r.sharingType && roomTypeClean && r.sharingType.toLowerCase().includes(roomTypeClean.toLowerCase())) ||
-                     (r.roomType && roomTypeClean && r.roomType.toLowerCase().includes(roomTypeClean.toLowerCase()))
-            ) || listing.rooms[0];
-
-            if (matchedConfig) {
-              matchedConfig.availableBeds = Math.min(matchedConfig.totalBeds || 999, (matchedConfig.availableBeds || 0) + 1);
-              matchedConfig.availableRooms = Math.min(matchedConfig.totalRooms || 999, (matchedConfig.availableRooms || 0) + 1);
-            }
-          }
-
-          await listing.save();
-        }
-      } else if (status === 'Active' && previousStatus === 'Notice') {
-        tenant.noticeDate = null;
-        tenant.expectedVacateDate = null;
-
-        const room = await RoomInventory.findOne({ propertyId: tenant.propertyId, roomNumber: tenant.roomNumber });
-        if (room && room.beds) {
-          const bed = room.beds.find((b) => String(b.occupiedBy) === String(tenant._id));
-          if (bed) {
-            bed.status = 'Occupied';
-            await room.save();
+          if (roomExists) {
+            const err = new Error(`${targetBedLabel} in Room ${targetRoomNumber} is already occupied.`);
+            err.statusCode = 400;
+            throw err;
           }
         }
       }
-    }
 
-    await tenant.save();
+      // 2. Handle status transitions atomically
+      if (status && status !== previousStatus) {
+        tenant.status = status;
+
+        if (status === 'Notice') {
+          tenant.noticeDate = noticeDate || new Date();
+          tenant.expectedVacateDate = expectedVacateDate || null;
+
+          await RoomInventory.updateOne(
+            { propertyId: tenant.propertyId, roomNumber: tenant.roomNumber, 'beds.occupiedBy': tenant._id },
+            { $set: { 'beds.$.status': 'Notice' } },
+            opts
+          );
+        } else if (status === 'Moved Out') {
+          tenant.moveOutDate = new Date();
+
+          await RoomInventory.updateOne(
+            { propertyId: tenant.propertyId, roomNumber: tenant.roomNumber, 'beds.occupiedBy': tenant._id },
+            { $set: { 'beds.$.status': 'Vacant', 'beds.$.occupiedBy': null, 'beds.$.tenantName': '' } },
+            opts
+          );
+          await Listing.updateOne(
+            { _id: tenant.propertyId },
+            { $inc: { availableBeds: 1, availableRooms: 1 } },
+            opts
+          );
+        } else if (status === 'Active' && previousStatus === 'Notice') {
+          tenant.noticeDate = null;
+          tenant.expectedVacateDate = null;
+
+          await RoomInventory.updateOne(
+            { propertyId: tenant.propertyId, roomNumber: tenant.roomNumber, 'beds.occupiedBy': tenant._id },
+            { $set: { 'beds.$.status': 'Occupied' } },
+            opts
+          );
+        }
+      }
+
+      // Update tenant fields
+      if (name) tenant.name = name.trim();
+      if (phone) tenant.phone = phone.trim();
+      if (email !== undefined) tenant.email = email.trim();
+      if (avatar !== undefined) tenant.avatar = avatar;
+      if (documents !== undefined && Array.isArray(documents)) tenant.documents = documents;
+      if (monthlyRent !== undefined) tenant.monthlyRent = Number(monthlyRent);
+      if (securityDeposit !== undefined) tenant.securityDeposit = Number(securityDeposit);
+      if (moveInDate !== undefined) tenant.moveInDate = moveInDate;
+      if (roomNumber) tenant.roomNumber = targetRoomNumber;
+      if (bedLabel) tenant.bedLabel = targetBedLabel;
+      if (emergencyContact) tenant.emergencyContact = emergencyContact;
+      if (notes !== undefined) tenant.notes = notes;
+
+      await tenant.save(opts);
+    });
 
     return success(res, {
       message: 'Tenant details updated successfully',
@@ -696,7 +1059,7 @@ const updateTenant = async (req, res) => {
     });
   } catch (err) {
     console.error('updateTenant error:', err);
-    return error(res, { message: 'Failed to update tenant', error: err.message });
+    return error(res, { message: err.message || 'Failed to update tenant', statusCode: err.statusCode || 500 });
   }
 };
 
@@ -706,47 +1069,36 @@ const deleteTenant = async (req, res) => {
     const ownerId = req.user._id;
     const { id } = req.params;
 
-    const tenant = await Tenant.findOne({ _id: id, ownerId });
+    const tenant = await Tenant.findOne({ _id: id, ownerId }).lean();
     if (!tenant) {
       return error(res, { message: 'Tenant not found or unauthorized', statusCode: 404 });
     }
 
-    // If tenant was active or in notice, free up bed and restore availableBeds & availableRooms
-    if (tenant.status !== 'Moved Out') {
-      const room = await RoomInventory.findOne({ propertyId: tenant.propertyId, roomNumber: tenant.roomNumber });
-      if (room && room.beds) {
-        const bed = room.beds.find((b) => String(b.occupiedBy) === String(tenant._id));
-        if (bed) {
-          bed.status = 'Vacant';
-          bed.occupiedBy = null;
-          bed.tenantName = '';
-          await room.save();
-        }
-      }
-
-      const listing = await Listing.findById(tenant.propertyId);
-      if (listing) {
-        listing.availableBeds = Math.min(listing.totalBeds || 999, (listing.availableBeds || 0) + 1);
-        listing.availableRooms = Math.min(listing.totalRooms || 999, (listing.availableRooms || 0) + 1);
-
-        if (Array.isArray(listing.rooms) && listing.rooms.length > 0) {
-          const roomTypeClean = room ? room.roomType : '';
-          const matchedConfig = listing.rooms.find(
-            (r) => (r.sharingType && roomTypeClean && r.sharingType.toLowerCase().includes(roomTypeClean.toLowerCase())) ||
-                   (r.roomType && roomTypeClean && r.roomType.toLowerCase().includes(roomTypeClean.toLowerCase()))
-          ) || listing.rooms[0];
-
-          if (matchedConfig) {
-            matchedConfig.availableBeds = Math.min(matchedConfig.totalBeds || 999, (matchedConfig.availableBeds || 0) + 1);
-            matchedConfig.availableRooms = Math.min(matchedConfig.totalRooms || 999, (matchedConfig.availableRooms || 0) + 1);
-          }
-        }
-
-        await listing.save();
-      }
+    const listing = await Listing.findOne({ _id: tenant.propertyId, owner: ownerId, status: 'active' }).select('_id').lean();
+    if (!listing) {
+      return error(res, {
+        message: 'Cannot delete tenant: Associated property is not active or approved.',
+        statusCode: 403,
+      });
     }
 
-    await Tenant.findByIdAndDelete(id);
+    await runInTransaction(async (session) => {
+      const opts = session ? { session } : {};
+      await Tenant.findByIdAndDelete(id, opts);
+
+      if (tenant.status !== 'Moved Out') {
+        await RoomInventory.updateOne(
+          { propertyId: tenant.propertyId, roomNumber: tenant.roomNumber, 'beds.occupiedBy': tenant._id },
+          { $set: { 'beds.$.status': 'Vacant', 'beds.$.occupiedBy': null, 'beds.$.tenantName': '' } },
+          opts
+        );
+        await Listing.updateOne(
+          { _id: tenant.propertyId },
+          { $inc: { availableBeds: 1, availableRooms: 1 } },
+          opts
+        );
+      }
+    });
 
     return success(res, { message: 'Tenant record removed successfully' });
   } catch (err) {
@@ -761,30 +1113,64 @@ const getLedger = async (req, res) => {
     const ownerId = req.user._id;
     const { propertyId, billingMonth = getCurrentBillingMonth() } = req.query;
 
-    const propertyFilter = { owner: ownerId };
+    const propertyFilter = { owner: ownerId, status: 'active' };
     if (propertyId && mongoose.Types.ObjectId.isValid(propertyId)) {
       propertyFilter._id = propertyId;
     }
-    const properties = await Listing.find(propertyFilter).select('_id title');
+    const properties = await Listing.find(propertyFilter).select('_id title').lean();
     const propertyIds = properties.map((p) => p._id);
 
-    // Active tenants for these properties
-    const tenants = await Tenant.find({
-      ownerId,
-      propertyId: { $in: propertyIds },
-      status: { $in: ['Active', 'Notice'] },
-    }).populate('propertyId', 'title');
+    if (propertyIds.length === 0) {
+      return success(res, {
+        message: 'Ledger retrieved successfully',
+        data: {
+          billingMonth,
+          summary: {
+            totalExpected: 0,
+            totalCollected: 0,
+            totalPending: 0,
+            totalSecurityDeposit: 0,
+            paidCount: 0,
+            partialCount: 0,
+            pendingCount: 0,
+          },
+          ledger: [],
+        },
+      });
+    }
 
-    // Payments recorded for this billingMonth
-    const payments = await RentPayment.find({
-      ownerId,
-      propertyId: { $in: propertyIds },
-      billingMonth,
-    }).sort({ paymentDate: -1 });
+    // Concurrently fetch active tenants and payments with minimal fields and .lean()
+    const [tenants, payments] = await Promise.all([
+      Tenant.find({
+        ownerId,
+        propertyId: { $in: propertyIds },
+        status: { $in: ['Active', 'Notice'] },
+      })
+        .select('name phone roomNumber bedLabel monthlyRent securityDeposit propertyId')
+        .populate('propertyId', 'title')
+        .lean(),
+      RentPayment.find({
+        ownerId,
+        propertyId: { $in: propertyIds },
+        billingMonth,
+      })
+        .sort({ paymentDate: -1 })
+        .lean(),
+    ]);
 
-    // Build ledger matrix
+    // O(M) Hash Map payment grouping instead of O(N*M) nested filter loop
+    const paymentsByTenantId = new Map();
+    for (const p of payments) {
+      const tid = String(p.tenantId);
+      if (!paymentsByTenantId.has(tid)) {
+        paymentsByTenantId.set(tid, []);
+      }
+      paymentsByTenantId.get(tid).push(p);
+    }
+
+    // Build ledger matrix in single O(N) pass
     const ledger = tenants.map((tenant) => {
-      const tenantPayments = payments.filter((p) => String(p.tenantId) === String(tenant._id));
+      const tenantPayments = paymentsByTenantId.get(String(tenant._id)) || [];
       const totalPaid = tenantPayments.reduce((sum, p) => sum + (p.amount || 0), 0);
       const monthlyRent = tenant.monthlyRent || 0;
       const balanceDue = Math.max(0, monthlyRent - totalPaid);
@@ -844,15 +1230,35 @@ const getLedger = async (req, res) => {
 const recordPayment = async (req, res) => {
   try {
     const ownerId = req.user._id;
-    const { tenantId, propertyId, billingMonth = getCurrentBillingMonth(), amount, paymentDate = new Date(), paymentMode = 'UPI', referenceNumber = '', notes = '' } = req.body;
+    const {
+      tenantId,
+      propertyId,
+      billingMonth = getCurrentBillingMonth(),
+      amount,
+      paymentDate = new Date(),
+      paymentMode = 'UPI',
+      referenceNumber = '',
+      notes = '',
+    } = req.body;
 
     if (!tenantId || !amount || Number(amount) <= 0) {
       return error(res, { message: 'tenantId and positive amount are required', statusCode: 400 });
     }
 
-    const tenant = await Tenant.findOne({ _id: tenantId, ownerId });
+    const tenant = await Tenant.findOne({ _id: tenantId, ownerId })
+      .select('name roomNumber propertyId')
+      .lean();
+
     if (!tenant) {
       return error(res, { message: 'Tenant not found or unauthorized', statusCode: 404 });
+    }
+
+    const listing = await Listing.findOne({ _id: tenant.propertyId, owner: ownerId, status: 'active' }).select('_id').lean();
+    if (!listing) {
+      return error(res, {
+        message: 'Cannot record payment: Associated property is not active or approved.',
+        statusCode: 403,
+      });
     }
 
     const payment = await RentPayment.create({
@@ -887,14 +1293,13 @@ const getFinancialAnalytics = async (req, res) => {
     const ownerId = req.user._id;
     const { propertyId } = req.query;
 
-    const propertyFilter = { owner: ownerId };
+    const propertyFilter = { owner: ownerId, status: 'active' };
     if (propertyId && mongoose.Types.ObjectId.isValid(propertyId)) {
       propertyFilter._id = propertyId;
     }
-    const properties = await Listing.find(propertyFilter).select('_id');
+    const properties = await Listing.find(propertyFilter).select('_id').lean();
     const propertyIds = properties.map((p) => p._id);
 
-    // Compute monthly trend based on requested range (3, 6, 12 months, or 'ytd')
     const rangeParam = String(req.query.range || req.query.months || '6').toLowerCase();
     const months = [];
     const now = new Date();
@@ -915,44 +1320,81 @@ const getFinancialAnalytics = async (req, res) => {
       }
     }
 
-    const payments = await RentPayment.find({
-      ownerId,
-      propertyId: { $in: propertyIds },
-      billingMonth: { $in: months },
+    if (propertyIds.length === 0) {
+      return success(res, {
+        message: 'Financial analytics retrieved',
+        data: {
+          monthlyTrend: months.map((month) => ({ month, expected: 0, collected: 0 })),
+          paymentModes: [],
+        },
+      });
+    }
+
+    const ownerObjId = new mongoose.Types.ObjectId(ownerId);
+
+    // Native MongoDB $facet aggregation computes monthly trend & payment mode breakdown directly
+    const [analyticsResult, activeTenantsSum] = await Promise.all([
+      RentPayment.aggregate([
+        {
+          $match: {
+            ownerId: ownerObjId,
+            propertyId: { $in: propertyIds },
+            billingMonth: { $in: months },
+          },
+        },
+        {
+          $facet: {
+            monthlyTotals: [
+              { $group: { _id: '$billingMonth', collected: { $sum: '$amount' } } },
+            ],
+            paymentModes: [
+              { $group: { _id: { $ifNull: ['$paymentMode', 'UPI'] }, amount: { $sum: '$amount' } } },
+            ],
+          },
+        },
+      ]),
+      Tenant.aggregate([
+        {
+          $match: {
+            ownerId: ownerObjId,
+            propertyId: { $in: propertyIds },
+            status: { $in: ['Active', 'Notice'] },
+          },
+        },
+        {
+          $group: {
+            _id: null,
+            baseExpected: { $sum: { $ifNull: ['$monthlyRent', 0] } },
+          },
+        },
+      ]),
+    ]);
+
+    const baseExpected = activeTenantsSum[0]?.baseExpected || 0;
+    const monthlyMap = new Map();
+    (analyticsResult[0]?.monthlyTotals || []).forEach((m) => {
+      monthlyMap.set(m._id, m.collected);
     });
 
-    // Active tenants for baseline monthly expected rent
-    const activeTenants = await Tenant.find({
-      ownerId,
-      propertyId: { $in: propertyIds },
-      status: { $in: ['Active', 'Notice'] },
-    });
-    const baseExpected = activeTenants.reduce((sum, t) => sum + (t.monthlyRent || 0), 0);
+    const monthlyTrend = months.map((month) => ({
+      month,
+      expected: baseExpected,
+      collected: monthlyMap.get(month) || 0,
+    }));
 
-    const monthlyTrend = months.map((month) => {
-      const monthPayments = payments.filter((p) => p.billingMonth === month);
-      const collected = monthPayments.reduce((sum, p) => sum + p.amount, 0);
-      return {
-        month,
-        expected: baseExpected,
-        collected,
-      };
-    });
-
-    // Payment mode breakdown
-    const modeCounts = {
+    const modeTotals = {
       UPI: 0,
       Cash: 0,
       'Bank Transfer': 0,
       Cheque: 0,
       Other: 0,
     };
-    payments.forEach((p) => {
-      const mode = p.paymentMode || 'UPI';
-      if (modeCounts[mode] !== undefined) {
-        modeCounts[mode] += p.amount;
+
+    (analyticsResult[0]?.paymentModes || []).forEach((pm) => {
+      if (modeTotals[pm._id] !== undefined) {
+        modeTotals[pm._id] += pm.amount;
       } else {
-        modeCounts.Other += p.amount;
+        modeTotals.Other += pm.amount;
       }
     });
 
@@ -960,7 +1402,7 @@ const getFinancialAnalytics = async (req, res) => {
       message: 'Financial analytics retrieved',
       data: {
         monthlyTrend,
-        paymentModes: Object.entries(modeCounts).map(([mode, amount]) => ({ mode, amount })),
+        paymentModes: Object.entries(modeTotals).map(([mode, amount]) => ({ mode, amount })),
       },
     });
   } catch (err) {
@@ -975,10 +1417,36 @@ const getPaymentHistory = async (req, res) => {
     const ownerId = req.user._id;
     const { propertyId, tenantId, billingMonth, paymentMode, search } = req.query;
 
-    const filter = { ownerId };
+    // Filter by owner's active/published properties
+    const activeProperties = await Listing.find({ owner: ownerId, status: 'active' }).select('_id').lean();
+    const activePropertyIds = activeProperties.map((p) => p._id);
+
+    if (activePropertyIds.length === 0) {
+      return success(res, {
+        message: 'Payment history retrieved successfully',
+        data: {
+          totalAmount: 0,
+          count: 0,
+          payments: [],
+        },
+      });
+    }
+
+    const filter = { ownerId, propertyId: { $in: activePropertyIds } };
 
     if (propertyId && propertyId !== 'ALL' && mongoose.Types.ObjectId.isValid(propertyId)) {
-      filter.propertyId = propertyId;
+      if (activePropertyIds.some((id) => String(id) === String(propertyId))) {
+        filter.propertyId = propertyId;
+      } else {
+        return success(res, {
+          message: 'Payment history retrieved successfully',
+          data: {
+            totalAmount: 0,
+            count: 0,
+            payments: [],
+          },
+        });
+      }
     }
     if (tenantId && mongoose.Types.ObjectId.isValid(tenantId)) {
       filter.tenantId = tenantId;
@@ -1001,7 +1469,8 @@ const getPaymentHistory = async (req, res) => {
 
     const payments = await RentPayment.find(filter)
       .populate('propertyId', 'title')
-      .sort({ paymentDate: -1, createdAt: -1 });
+      .sort({ paymentDate: -1, createdAt: -1 })
+      .lean();
 
     const totalAmount = payments.reduce((sum, p) => sum + (p.amount || 0), 0);
 
@@ -1025,13 +1494,19 @@ const getTenantById = async (req, res) => {
     const ownerId = req.user._id;
     const { id } = req.params;
 
-    const tenant = await Tenant.findOne({ _id: id, ownerId }).populate('propertyId', 'title address city area images');
+    const [tenant, payments] = await Promise.all([
+      Tenant.findOne({ _id: id, ownerId })
+        .populate('propertyId', 'title address city area images status')
+        .lean(),
+      RentPayment.find({ tenantId: id, ownerId })
+        .sort({ paymentDate: -1, createdAt: -1 })
+        .lean(),
+    ]);
+
     if (!tenant) {
       return error(res, { message: 'Tenant not found or unauthorized', statusCode: 404 });
     }
 
-    // Fetch tenant payments
-    const payments = await RentPayment.find({ tenantId: tenant._id, ownerId }).sort({ paymentDate: -1, createdAt: -1 });
     const totalPaid = payments.reduce((sum, p) => sum + (p.amount || 0), 0);
 
     return success(res, {
@@ -1053,7 +1528,6 @@ const downloadTenantTemplate = async (req, res) => {
   try {
     const { format = 'xlsx' } = req.query;
 
-    // Sheet 1: Sample & Pre-configured Data
     const templateData = [
       {
         'Full Name': 'Rahul Sharma',
@@ -1099,7 +1573,6 @@ const downloadTenantTemplate = async (req, res) => {
       },
     ];
 
-    // Sheet 2: Guidelines & Instructions
     const instructionData = [
       {
         'Field Name': 'Full Name',
@@ -1179,26 +1652,26 @@ const downloadTenantTemplate = async (req, res) => {
 
     const wsTenants = XLSX.utils.json_to_sheet(templateData);
     wsTenants['!cols'] = [
-      { wch: 20 }, // Full Name
-      { wch: 15 }, // Phone Number
-      { wch: 26 }, // Email
-      { wch: 14 }, // Room Number
-      { wch: 14 }, // Bed Label
-      { wch: 14 }, // Monthly Rent
-      { wch: 16 }, // Security Deposit
-      { wch: 14 }, // Move In Date
-      { wch: 20 }, // Emergency Name
-      { wch: 16 }, // Emergency Phone
-      { wch: 18 }, // Emergency Relation
-      { wch: 28 }, // Notes
+      { wch: 20 },
+      { wch: 15 },
+      { wch: 26 },
+      { wch: 14 },
+      { wch: 14 },
+      { wch: 14 },
+      { wch: 16 },
+      { wch: 14 },
+      { wch: 20 },
+      { wch: 16 },
+      { wch: 18 },
+      { wch: 28 },
     ];
 
     const wsInstructions = XLSX.utils.json_to_sheet(instructionData);
     wsInstructions['!cols'] = [
-      { wch: 20 }, // Field Name
-      { wch: 16 }, // Required
-      { wch: 60 }, // Rules & Format
-      { wch: 25 }, // Example
+      { wch: 20 },
+      { wch: 16 },
+      { wch: 60 },
+      { wch: 25 },
     ];
 
     XLSX.utils.book_append_sheet(wb, wsTenants, 'Tenants');
@@ -1225,7 +1698,7 @@ const downloadTenantTemplate = async (req, res) => {
 const bulkAddTenants = async (req, res) => {
   try {
     const ownerId = req.user._id;
-    let { propertyId, tenants, autoProvision = false } = req.body;
+    let { propertyId, tenants } = req.body;
 
     // Handle file upload if multipart/form-data with file was submitted
     if (req.file) {
@@ -1247,32 +1720,38 @@ const bulkAddTenants = async (req, res) => {
       return error(res, { message: 'No rentee records provided for bulk import', statusCode: 400 });
     }
 
-    const listing = await Listing.findOne({ _id: propertyId, owner: ownerId });
+    // 1. Preload property (active only), existing active rentees, and current room inventory in parallel
+    const [listing, existingTenants, rooms] = await Promise.all([
+      Listing.findOne({ _id: propertyId, owner: ownerId, status: 'active' }).select('_id').lean(),
+      Tenant.find({ propertyId, status: { $in: ['Active', 'Notice'] } }).select('phone').lean(),
+      RoomInventory.find({ propertyId }),
+    ]);
+
     if (!listing) {
-      return error(res, { message: 'Property not found or unauthorized', statusCode: 404 });
+      return error(res, {
+        message: 'Cannot bulk upload rentees: Property not found, unauthorized, or not yet approved/published.',
+        statusCode: 404,
+      });
     }
 
-    // Load existing active tenants under this property to check phone collisions
-    const existingTenants = await Tenant.find({ propertyId, status: { $in: ['Active', 'Notice'] } }).select('phone roomNumber bedLabel');
     const existingPhones = new Set(existingTenants.map((t) => String(t.phone).trim()));
-
-    // Load current room inventory
-    const rooms = await RoomInventory.find({ propertyId });
     const roomMap = new Map();
     rooms.forEach((r) => {
       roomMap.set(String(r.roomNumber).trim(), r);
     });
 
+    const tenantsToInsert = [];
     const successRows = [];
     const failedRows = [];
     const batchPhonesInPayload = new Set();
     const batchBedKeysInPayload = new Set();
+    const roomsToUpdateMap = new Map();
 
+    // 2. Validate all rows in memory
     for (let index = 0; index < tenants.length; index++) {
       const raw = tenants[index];
-      const rowNum = index + 2; // Row 1 is header in spreadsheets
+      const rowNum = index + 2;
 
-      // Normalize field names (support both Excel headers and JSON keys)
       const name = String(raw['Full Name'] || raw.name || '').trim();
       let phone = String(raw['Phone Number'] || raw.phone || '').trim().replace(/\D/g, '');
       if (phone.length > 10 && phone.startsWith('91')) {
@@ -1283,15 +1762,13 @@ const bulkAddTenants = async (req, res) => {
       const rawBedLabel = String(raw['Bed Label'] || raw.bedLabel || '').trim();
       const monthlyRent = Number(raw['Monthly Rent'] !== undefined ? raw['Monthly Rent'] : raw.monthlyRent);
       const securityDeposit = Number(raw['Security Deposit'] !== undefined ? raw['Security Deposit'] : (raw.securityDeposit || 0)) || 0;
-      
+
       let moveInDate = raw['Move In Date'] || raw.moveInDate;
       let parsedDate = new Date();
       if (moveInDate) {
         if (typeof moveInDate === 'number') {
-          // Excel date serial number conversion
           parsedDate = new Date(Math.round((moveInDate - 25569) * 86400 * 1000));
         } else {
-          // Check DD-MM-YYYY or DD/MM/YYYY
           const dmyMatch = String(moveInDate).match(/^(\d{1,2})[-/](\d{1,2})[-/](\d{4})$/);
           if (dmyMatch) {
             parsedDate = new Date(Number(dmyMatch[3]), Number(dmyMatch[2]) - 1, Number(dmyMatch[1]));
@@ -1307,14 +1784,22 @@ const bulkAddTenants = async (req, res) => {
       const emergencyRelation = String(raw['Emergency Relation'] || raw.emergencyRelation || (raw.emergencyContact && raw.emergencyContact.relation) || '').trim();
       const notes = String(raw['Notes'] || raw.notes || '').trim();
 
-      // Field Validations
       if (!name) {
         failedRows.push({ row: rowNum, name: name || 'Unnamed', reason: 'Full Name is required' });
         continue;
       }
 
-      if (!phone || phone.length < 10) {
-        failedRows.push({ row: rowNum, name, reason: `Invalid phone number: '${raw['Phone Number'] || raw.phone || ''}'. Must be a 10-digit number.` });
+      if (!phone || !/^[6-9]\d{9}$/.test(phone)) {
+        failedRows.push({ row: rowNum, name, reason: `Invalid phone number: '${raw['Phone Number'] || raw.phone || ''}'. Must be a valid 10-digit mobile number.` });
+        continue;
+      }
+
+      let cleanEmergencyPhone = emergencyPhone.replace(/\D/g, '');
+      if (cleanEmergencyPhone.length > 10 && cleanEmergencyPhone.startsWith('91')) {
+        cleanEmergencyPhone = cleanEmergencyPhone.slice(2);
+      }
+      if (cleanEmergencyPhone && !/^[6-9]\d{9}$/.test(cleanEmergencyPhone)) {
+        failedRows.push({ row: rowNum, name, reason: `Invalid emergency phone: '${raw['Emergency Phone'] || raw.emergencyPhone || ''}'. Must be a valid 10-digit mobile number.` });
         continue;
       }
 
@@ -1328,7 +1813,6 @@ const bulkAddTenants = async (req, res) => {
         continue;
       }
 
-      // Mandatory Bed Label Validation: Even for single-bed rooms, Bed Label is required
       if (!rawBedLabel) {
         failedRows.push({
           row: rowNum,
@@ -1338,7 +1822,6 @@ const bulkAddTenants = async (req, res) => {
         continue;
       }
 
-      // Normalize Bed Label (e.g. "bed 1" -> "Bed 1", "1" -> "Bed 1")
       let normalizedBedLabel = rawBedLabel;
       if (/^\d+$/.test(rawBedLabel)) {
         normalizedBedLabel = `Bed ${rawBedLabel}`;
@@ -1347,28 +1830,23 @@ const bulkAddTenants = async (req, res) => {
         normalizedBedLabel = `Bed ${numPart}`;
       }
 
-      // Duplicate phone check against existing active tenants (Option A: skip with duplicate error)
       if (existingPhones.has(phone)) {
         failedRows.push({ row: rowNum, name, reason: `Phone number ${phone} is already registered to an active rentee in this property` });
         continue;
       }
 
-      // Duplicate phone check within current batch
       if (batchPhonesInPayload.has(phone)) {
         failedRows.push({ row: rowNum, name, reason: `Duplicate phone number ${phone} appears multiple times in the upload` });
         continue;
       }
 
-      // Double-booking check within current batch
       const batchBedKey = `${roomNumber}::${normalizedBedLabel}`.toLowerCase();
       if (batchBedKeysInPayload.has(batchBedKey)) {
         failedRows.push({ row: rowNum, name, reason: `Room ${roomNumber} - ${normalizedBedLabel} is assigned more than once in this batch` });
         continue;
       }
 
-      // Room & Bed availability check in database
       let targetRoom = roomMap.get(roomNumber);
-
       if (!targetRoom) {
         failedRows.push({
           row: rowNum,
@@ -1378,14 +1856,12 @@ const bulkAddTenants = async (req, res) => {
         continue;
       }
 
-      // Check if bed exists in targetRoom
-      let targetBed = targetRoom.beds.find((b) => b.label.toLowerCase() === normalizedBedLabel.toLowerCase());
-
+      let targetBed = (targetRoom.beds || []).find((b) => b.label.toLowerCase() === normalizedBedLabel.toLowerCase());
       if (!targetBed) {
         failedRows.push({
           row: rowNum,
           name,
-          reason: `${normalizedBedLabel} does not exist in Room ${roomNumber}. Available beds: ${targetRoom.beds.map((b) => b.label).join(', ') || 'None'}`,
+          reason: `${normalizedBedLabel} does not exist in Room ${roomNumber}. Available beds: ${(targetRoom.beds || []).map((b) => b.label).join(', ') || 'None'}`,
         });
         continue;
       }
@@ -1399,62 +1875,72 @@ const bulkAddTenants = async (req, res) => {
         continue;
       }
 
-      // Validated. Create tenant record
-      try {
-        const createdTenant = await Tenant.create({
-          ownerId,
-          propertyId,
-          roomId: targetRoom._id,
-          roomNumber,
-          bedLabel: targetBed.label,
-          name,
-          phone,
-          email,
-          emergencyContact: {
-            name: emergencyName,
-            phone: emergencyPhone,
-            relation: emergencyRelation,
-          },
-          moveInDate: parsedDate,
-          monthlyRent,
-          securityDeposit,
-          status: 'Active',
-          notes,
-        });
+      const newTenantId = new mongoose.Types.ObjectId();
+      tenantsToInsert.push({
+        _id: newTenantId,
+        ownerId,
+        propertyId,
+        roomId: targetRoom._id,
+        roomNumber,
+        bedLabel: targetBed.label,
+        name,
+        phone,
+        email,
+        emergencyContact: {
+          name: emergencyName,
+          phone: emergencyPhone,
+          relation: emergencyRelation,
+        },
+        moveInDate: parsedDate,
+        monthlyRent,
+        securityDeposit,
+        status: 'Active',
+        notes,
+      });
 
-        // Update bed status in memory and persist
-        targetBed.status = 'Occupied';
-        targetBed.occupiedBy = createdTenant._id;
-        targetBed.tenantName = createdTenant.name;
-        await targetRoom.save();
+      targetBed.status = 'Occupied';
+      targetBed.occupiedBy = newTenantId;
+      targetBed.tenantName = name;
+      roomsToUpdateMap.set(String(targetRoom._id), targetRoom);
 
-        // Mark phone and bed as used
-        existingPhones.add(phone);
-        batchPhonesInPayload.add(phone);
-        batchBedKeysInPayload.add(batchBedKey);
+      existingPhones.add(phone);
+      batchPhonesInPayload.add(phone);
+      batchBedKeysInPayload.add(batchBedKey);
 
-        successRows.push({
-          row: rowNum,
-          tenantId: createdTenant._id,
-          name: createdTenant.name,
-          roomNumber: createdTenant.roomNumber,
-          bedLabel: createdTenant.bedLabel,
-          phone: createdTenant.phone,
-        });
-      } catch (createErr) {
-        failedRows.push({ row: rowNum, name, reason: createErr.message || 'Database error creating tenant' });
-      }
+      successRows.push({
+        row: rowNum,
+        tenantId: newTenantId,
+        name,
+        roomNumber,
+        bedLabel: targetBed.label,
+        phone,
+      });
     }
 
-    // Synchronize listing availableRooms & availableBeds
-    if (successRows.length > 0) {
-      if (listing.availableRooms > 0) {
-        listing.availableRooms = Math.max(0, listing.availableRooms - successRows.length);
-      }
-      if (listing.availableBeds > 0) {
-        listing.availableBeds = Math.max(0, listing.availableBeds - successRows.length);
-      }
-      await listing.save();
+    // 3. Execute batch operations inside a transaction
+    if (tenantsToInsert.length > 0) {
+      await runInTransaction(async (session) => {
+        const opts = session ? { session } : {};
+
+        const bulkRoomOps = Array.from(roomsToUpdateMap.values()).map((roomDoc) => ({
+          updateOne: {
+            filter: { _id: roomDoc._id },
+            update: { $set: { beds: roomDoc.beds } },
+          },
+        }));
+
+        await Tenant.insertMany(tenantsToInsert, opts);
+
+        if (bulkRoomOps.length > 0) {
+          await RoomInventory.bulkWrite(bulkRoomOps, opts);
+        }
+
+        await Listing.updateOne(
+          { _id: propertyId },
+          { $inc: { availableBeds: -tenantsToInsert.length, availableRooms: -tenantsToInsert.length } },
+          opts
+        );
+      });
     }
 
     return success(res, {
@@ -1477,6 +1963,7 @@ module.exports = {
   getPortfolioOverview,
   getInventory,
   addOrUpdateRoom,
+  bulkAddOrUpdateRooms,
   deleteRoom,
   deleteAllRooms,
   getTenants,
@@ -1491,5 +1978,3 @@ module.exports = {
   getPaymentHistory,
   getFinancialAnalytics,
 };
-
-

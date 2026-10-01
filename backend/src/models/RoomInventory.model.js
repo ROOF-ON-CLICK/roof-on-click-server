@@ -32,13 +32,11 @@ const roomInventorySchema = new mongoose.Schema(
       type: mongoose.Schema.Types.ObjectId,
       ref: 'Listing',
       required: true,
-      index: true,
     },
     ownerId: {
       type: mongoose.Schema.Types.ObjectId,
       ref: 'User',
       required: true,
-      index: true,
     },
     floorNumber: {
       type: Number,
@@ -77,5 +75,8 @@ const roomInventorySchema = new mongoose.Schema(
 );
 
 roomInventorySchema.index({ propertyId: 1, roomNumber: 1 }, { unique: true });
+roomInventorySchema.index({ propertyId: 1, floorNumber: 1, roomNumber: 1 });
+roomInventorySchema.index({ ownerId: 1, propertyId: 1 });
+roomInventorySchema.index({ propertyId: 1, 'beds.occupiedBy': 1 });
 
 module.exports = mongoose.model('RoomInventory', roomInventorySchema);
