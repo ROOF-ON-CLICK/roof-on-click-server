@@ -46,6 +46,7 @@ const getListings = async (req, res, next) => {
       amenities,
       sharing,
       verified,
+      featured,
       page = 1,
       limit = 12,
       sort = 'newest',
@@ -56,6 +57,9 @@ const getListings = async (req, res, next) => {
     // Build filter — always only show active listings
     const filter = { status: 'active' };
     
+    if (featured === 'true' || featured === true) {
+      filter.isFeatured = true;
+    }
     if (city) {
       const cleanCity = decodeURIComponent(city).replace(/\+/g, ' ').trim();
       filter['address.city'] = { $regex: cleanCity, $options: 'i' };
@@ -95,18 +99,21 @@ const getListings = async (req, res, next) => {
       filter.$text = { $search: q };
     }
 
-    // Sort
+    // Sort — default to prioritizing featured listings
     let sortObj = {};
     switch (sort) {
       case 'rent_asc':
-        sortObj = { 'rent.monthly': 1 };
+        sortObj = { isFeatured: -1, 'rent.monthly': 1 };
         break;
       case 'rent_desc':
-        sortObj = { 'rent.monthly': -1 };
+        sortObj = { isFeatured: -1, 'rent.monthly': -1 };
+        break;
+      case 'featured':
+        sortObj = { isFeatured: -1, createdAt: -1 };
         break;
       case 'newest':
       default:
-        sortObj = { createdAt: -1 };
+        sortObj = { isFeatured: -1, createdAt: -1 };
         break;
     }
 
