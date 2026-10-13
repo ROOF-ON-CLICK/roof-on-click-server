@@ -13,7 +13,7 @@ const {
   getAvailableCities,
 } = require('../controllers/listing.controller');
 
-const { verifyToken, optionalAuth, requireRole, isOwnerOf } = require('../middleware/auth.middleware');
+const { verifyToken, optionalAuth, requireRole, requireEmailVerified, isOwnerOf } = require('../middleware/auth.middleware');
 const { uploadToR2 } = require('../middleware/upload.middleware');
 const Listing = require('../models/Listing.model');
 
@@ -76,7 +76,8 @@ router.get('/:id', optionalAuth, getListing);
 router.get('/:id/whatsapp-link', getWhatsAppLink);
 
 // ─── Protected Routes — Owner or Admin ───────────────────────────────────────
-router.post('/', verifyToken, requireRole('owner'), listingValidation, createListing);
+// ROO-47: owners must verify email before listing (admins bypass via middleware)
+router.post('/', verifyToken, requireRole('owner'), requireEmailVerified, listingValidation, createListing);
 
 router.put(
   '/:id',

@@ -16,6 +16,18 @@ const { Resend } = require('resend');
 const FROM_EMAIL =
   process.env.RESEND_FROM_EMAIL || 'RoofOnClick <onboarding@resend.dev>';
 
+// One-time boot warning: an empty RESEND_FROM_EMAIL falls back to Resend's
+// shared test domain, which delivers ONLY to the account owner and rejects
+// every other recipient server-side. Without a verified domain, no real user
+// will ever receive mail — fail loud here instead of debugging silent 201s.
+if (!process.env.RESEND_FROM_EMAIL) {
+  console.warn(
+    '[email.service] WARNING: RESEND_FROM_EMAIL is not set — using test domain ' +
+    'onboarding@resend.dev. Real recipients WILL be rejected by Resend. ' +
+    'Verify a domain at resend.com/domains and set RESEND_FROM_EMAIL.'
+  );
+}
+
 const FRONTEND_URL =
   process.env.FRONTEND_URL || 'http://localhost:3000';
 
@@ -36,11 +48,16 @@ function getResendClient() {
 /**
  * Clean plain-text fallback generator for anti-spam multipart compliance.
  */
-function buildPlainTextEmail({ name, title, message, details = [], actionUrl, actionText }) {
+function buildPlainTextEmail({ name, title, message, details = [], actionUrl, actionText, otp = null, otpExpiryMinutes = 10 }) {
   let text = `RoofOnClick — Student & Professional Housing\n\n`;
   if (name) text += `Hi ${name},\n\n`;
   if (title) text += `${title}\n\n`;
   if (message) text += `${message}\n\n`;
+
+  if (otp) {
+    text += `Your email verification code: ${otp}\n`;
+    text += `This code expires in ${otpExpiryMinutes} minutes. If you did not create a RoofOnClick account, you can safely ignore this email.\n\n`;
+  }
 
   if (details && details.length > 0) {
     text += `Details:\n`;
@@ -71,6 +88,8 @@ function buildBrandedEmailTemplate({
   actionUrl = null,
   actionText = 'View in App',
   footerNote = null,
+  otp = null,
+  otpExpiryMinutes = 10,
 }) {
   const fullActionUrl = actionUrl
     ? (actionUrl.startsWith('http') ? actionUrl : `${FRONTEND_URL}${actionUrl}`)
@@ -104,6 +123,21 @@ function buildBrandedEmailTemplate({
             <a href="${fullActionUrl}" target="_blank" rel="noopener noreferrer" style="display:inline-block;padding:13px 32px;color:#ffffff;font-size:14px;font-weight:700;text-decoration:none;letter-spacing:0.3px;">
               ${actionText} &rarr;
             </a>
+          </td>
+        </tr>
+      </table>`
+    : '';
+
+  // OTP verification block (ROO-47) — rendered only when an OTP is provided.
+  // Table-based + inline styles to match the existing email-client-safe pattern.
+  const otpHtml = otp
+    ? `
+      <table width="100%" cellpadding="0" cellspacing="0" style="margin:8px 0 8px;background:#0f172a;border:1px dashed #10b981;border-radius:12px;">
+        <tr>
+          <td align="center" style="padding:22px 20px;">
+            <p style="margin:0 0 6px;color:#94a3b8;font-size:12px;font-weight:600;text-transform:uppercase;letter-spacing:1.5px;">Your verification code</p>
+            <p style="margin:0 0 8px;color:#ffffff;font-size:34px;font-weight:800;letter-spacing:8px;font-family:'Courier New',Courier,monospace;">${otp}</p>
+            <p style="margin:0;color:#64748b;font-size:12px;line-height:1.5;">Enter this code in the app to verify your email. It expires in ${otpExpiryMinutes} minutes.</p>
           </td>
         </tr>
       </table>`
@@ -148,6 +182,7 @@ function buildBrandedEmailTemplate({
             <h2 style="margin:0 0 14px;color:#f8fafc;font-size:18px;font-weight:700;line-height:1.4;">${title}</h2>
             <p style="margin:0 0 16px;color:#94a3b8;font-size:14px;line-height:1.6;">${message}</p>
 
+            ${otpHtml}
             ${detailsHtml}
             ${actionButtonHtml}
 
@@ -180,6 +215,8 @@ function buildBrandedEmailTemplate({
 
 /**
  * Universal transactional email sender with anti-spam headers and multipart payload.
+ * Returns { ok, id?, mocked?, error? } so callers can log delivery outcome.
+ * Never throws — failures are logged and reported via the return value.
  */
 async function sendTransactionalEmail({
   to,
@@ -192,13 +229,15 @@ async function sendTransactionalEmail({
   actionUrl = null,
   actionText = 'View in App',
   footerNote = null,
+  otp = null,
+  otpExpiryMinutes = 10,
 }) {
-  if (!to) return;
+  if (!to) return { ok: false, error: 'missing-recipient' };
 
   const resend = getResendClient();
   if (!resend) {
     console.log(`[email.service] [DEV MOCK] Email to: ${to} | Subject: "${subject}" | Title: "${title}"`);
-    return;
+    return { ok: true, mocked: true };
   }
 
   const html = buildBrandedEmailTemplate({
@@ -210,6 +249,8 @@ async function sendTransactionalEmail({
     actionUrl,
     actionText,
     footerNote,
+    otp,
+    otpExpiryMinutes,
   });
 
   const text = buildPlainTextEmail({
@@ -219,10 +260,14 @@ async function sendTransactionalEmail({
     details,
     actionUrl,
     actionText,
+    otp,
+    otpExpiryMinutes,
   });
 
   try {
-    await resend.emails.send({
+    // NOTE: Resend SDK resolves { data, error } on API rejections (no throw),
+    // so both paths must be handled or failures go completely unnoticed.
+    const { data, error: resendError } = await resend.emails.send({
       from: FROM_EMAIL,
       to,
       subject,
@@ -234,8 +279,18 @@ async function sendTransactionalEmail({
         'Precedence': 'bulk',
       },
     });
+    if (resendError) {
+      console.error(
+        `[email.service] Resend rejected email to ${to} | subject="${subject}" | ${resendError.name || ''} ${resendError.message || ''}`.trim()
+      );
+      return { ok: false, error: resendError.message || 'resend-rejected' };
+    }
+    return { ok: true, id: (data && data.id) || null };
   } catch (err) {
-    console.error(`[email.service] Failed to send email to ${to}:`, err.message);
+    console.error(
+      `[email.service] Failed to send email to ${to} | subject="${subject}" | ${err.name || ''} ${err.message || ''}`.trim()
+    );
+    return { ok: false, error: err.message || 'send-failed' };
   }
 }
 
@@ -402,8 +457,12 @@ async function sendOAuthAccountEmail(to, name) {
 
 /**
  * Send welcome email on account registration.
+ * When an OTP is provided (ROO-47 Phase 1), it is rendered as a
+ * verification-code block in both the HTML and plain-text parts.
+ * otp is optional so existing callers keep working unchanged.
+ * Returns the sendTransactionalEmail outcome ({ ok, ... }) for logging.
  */
-async function sendWelcomeEmail(to, name, role = 'seeker') {
+async function sendWelcomeEmail(to, name, role = 'seeker', otp = null) {
   const isOwner = role === 'owner';
   const subject = `Welcome to RoofOnClick, ${name || 'there'}! 🏠`;
   const badge = isOwner ? 'Partner Onboarding' : 'Welcome';
@@ -421,7 +480,7 @@ async function sendWelcomeEmail(to, name, role = 'seeker') {
     { label: 'Location Hub', value: 'Indore, MP' },
   ];
 
-  await sendTransactionalEmail({
+  return sendTransactionalEmail({
     to,
     name,
     subject,
@@ -431,6 +490,53 @@ async function sendWelcomeEmail(to, name, role = 'seeker') {
     details,
     actionUrl,
     actionText,
+    otp,
+  });
+}
+
+/**
+ * Send a standalone verification-code email (ROO-47 Phase 2).
+ * Used by POST /resend-verification — lighter than the full welcome mail,
+ * same branded template + OTP block.
+ */
+async function sendVerificationOtpEmail(to, name, otp) {
+  return sendTransactionalEmail({
+    to,
+    name,
+    subject: 'Your RoofOnClick verification code',
+    badge: 'Verification',
+    title: 'Verify your email address',
+    message: 'Use the code below to verify your RoofOnClick account email. If you did not request this code, you can safely ignore this email.',
+    actionUrl: '/verify-email',
+    actionText: 'Verify Email',
+    otp,
+  });
+}
+
+/**
+ * Congratulations mail sent once the user verifies their email (ROO-47).
+ * Second Resend send in the lifecycle: signup delivers welcome+OTP (mail 1),
+ * this delivers the post-verification congratulations (mail 2, no OTP block).
+ * Returns the sendTransactionalEmail outcome ({ ok, ... }) for logging.
+ */
+async function sendEmailVerifiedSuccessEmail(to, name, role = 'seeker') {
+  const isOwner = role === 'owner';
+  return sendTransactionalEmail({
+    to,
+    name,
+    subject: `Your email is verified — welcome to RoofOnClick! 🎉`,
+    badge: 'Verified',
+    title: 'Congratulations — your email is verified!',
+    message: isOwner
+      ? 'Your email address has been verified successfully. You now have full access to the RoofOnClick partner network — list your properties, receive live enquiries, and track bookings with zero brokerage.'
+      : 'Your email address has been verified successfully. You now have full access to RoofOnClick — explore verified hostels, PGs, and apartments, send enquiries, and book visits with zero brokerage.',
+    details: [
+      { label: 'Verification', value: 'Email confirmed' },
+      { label: 'Account Type', value: isOwner ? 'Property Owner / Partner' : 'Resident / Seeker' },
+      { label: 'Zero Brokerage', value: '100% Guaranteed' },
+    ],
+    actionUrl: isOwner ? '/owner/properties' : '/properties',
+    actionText: isOwner ? 'Go to Partner Dashboard' : 'Start Exploring',
   });
 }
 
@@ -440,4 +546,6 @@ module.exports = {
   sendPasswordResetEmail,
   sendOAuthAccountEmail,
   sendWelcomeEmail,
+  sendVerificationOtpEmail,
+  sendEmailVerifiedSuccessEmail,
 };

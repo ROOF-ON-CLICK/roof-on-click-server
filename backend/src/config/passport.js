@@ -59,6 +59,12 @@ if (isOAuthConfigured) {
             // User exists - link Google account if needed
             if (!user.googleId) user.googleId = googleId;
             if (!user.avatar) user.avatar = avatar;
+            // ROO-47: Google-confirmed emails are pre-verified — flip the flag
+            // on every Google login so legacy accounts self-heal.
+            if (!user.isEmailVerified) {
+              user.isEmailVerified = true;
+              user.emailVerifiedAt = new Date();
+            }
             if (intent === 'signup' && role === 'owner' && user.role !== 'admin') {
               user.role = 'owner';
               user.isTrialActive = true;
@@ -87,6 +93,8 @@ if (isOAuthConfigured) {
             avatar,
             role,
             isVerified: true, // Google-verified email
+            isEmailVerified: true, // ROO-47: Google-confirmed email needs no OTP
+            emailVerifiedAt: new Date(),
             trialEndsAt,
             isTrialActive: isOwner,
           });
