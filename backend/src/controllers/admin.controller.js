@@ -1,59 +1,158 @@
+const mongoose = require('mongoose');
 const Listing = require('../models/Listing.model');
 const User = require('../models/User.model');
 const Booking = require('../models/Booking.model');
 const Review = require('../models/Review.model');
 const SupportTicket = require('../models/SupportTicket.model');
 const Payment = require('../models/Payment.model');
+const AuditLog = require('../models/AuditLog.model');
+const SystemSetting = require('../models/SystemSetting.model');
+const RoomInventory = require('../models/RoomInventory.model');
 const { createNotification } = require('../services/notification.service');
 const { success, error } = require('../utils/apiResponse');
 
+// Helper to record audit log
+const logAdminAction = async ({ actor, action, targetType, targetId, details = {}, req, session = null }) => {
+  try {
+    const ipAddress = req?.headers['x-forwarded-for'] || req?.socket?.remoteAddress || '';
+    const userAgent = req?.headers['user-agent'] || '';
+    const logDoc = new AuditLog({
+      actor,
+      actorRole: 'admin',
+      action,
+      targetType,
+      targetId,
+      details,
+      ipAddress,
+      userAgent,
+    });
+    if (session) {
+      await logDoc.save({ session });
+    } else {
+      await logDoc.save();
+    }
+  } catch (err) {
+    console.warn('[AuditLog] Failed to log admin action:', err.message);
+  }
+};
+
 // ─── GET /api/admin/stats ─────────────────────────────────────────────────────
 /**
- * Summary KPIs and dashboard counters for Admin Overview.
- */
+  * Summary KPIs and dashboard counters for Admin Overview.
+  * Optimized using single MongoDB aggregation pipelines for fast calculation.
+  */
 const getDashboardStats = async (req, res, next) => {
   try {
-    const [
-      totalProperties,
-      pendingProperties,
-      activeProperties,
-      rejectedProperties,
-      totalUsers,
-      totalOwners,
-      totalSeekers,
-      totalBookings,
-      pendingBookings,
-      totalReviews,
-      recentProperties,
-    ] = await Promise.all([
-      Listing.countDocuments(),
-      Listing.countDocuments({ status: 'pending' }),
-      Listing.countDocuments({ status: 'active' }),
-      Listing.countDocuments({ status: 'rejected' }),
-      User.countDocuments(),
-      User.countDocuments({ role: 'owner' }),
-      User.countDocuments({ role: 'seeker' }),
-      Booking.countDocuments(),
-      Booking.countDocuments({ status: 'pending' }),
-      Review.countDocuments(),
-      Listing.find().sort({ createdAt: -1 }).limit(5).populate('owner', 'name email phone').lean(),
+    const [listingStats, userStats, bookingStats, paymentStats, reviewStats, recentProperties] = await Promise.all([
+      // Listing counts in a single aggregation pass
+      Listing.aggregate([
+        {
+          $facet: {
+            total: [{ $count: 'count' }],
+            pending: [{ $match: { status: 'pending' } }, { $count: 'count' }],
+            active: [{ $match: { status: 'active' } }, { $count: 'count' }],
+            rejected: [{ $match: { status: 'rejected' } }, { $count: 'count' }],
+            draft: [{ $match: { status: 'draft' } }, { $count: 'count' }],
+            verified: [{ $match: { isVerified: true } }, { $count: 'count' }],
+            featured: [{ $match: { isFeatured: true } }, { $count: 'count' }],
+          },
+        },
+      ]),
+      // User counts in a single aggregation pass
+      User.aggregate([
+        {
+          $facet: {
+            total: [{ $count: 'count' }],
+            owners: [{ $match: { role: 'owner' } }, { $count: 'count' }],
+            seekers: [{ $match: { role: 'seeker' } }, { $count: 'count' }],
+            admins: [{ $match: { role: 'admin' } }, { $count: 'count' }],
+            verified: [{ $match: { isVerified: true } }, { $count: 'count' }],
+          },
+        },
+      ]),
+      // Booking counts
+      Booking.aggregate([
+        {
+          $facet: {
+            total: [{ $count: 'count' }],
+            pending: [{ $match: { status: 'pending' } }, { $count: 'count' }],
+            confirmed: [{ $match: { status: 'confirmed' } }, { $count: 'count' }],
+            cancelled: [{ $match: { status: 'cancelled' } }, { $count: 'count' }],
+          },
+        },
+      ]),
+      // Payment aggregates (total volume, monthly volume)
+      Payment.aggregate([
+        {
+          $facet: {
+            totalVolume: [
+              { $match: { status: 'paid' } },
+              { $group: { _id: null, total: { $sum: '$amount' } } },
+            ],
+            thisMonth: [
+              {
+                $match: {
+                  status: 'paid',
+                  createdAt: { $gte: new Date(new Date().getFullYear(), new Date().getMonth(), 1) },
+                },
+              },
+              { $group: { _id: null, total: { $sum: '$amount' } } },
+            ],
+          },
+        },
+      ]),
+      // Review count & avg rating
+      Review.aggregate([
+        {
+          $group: {
+            _id: null,
+            totalReviews: { $sum: 1 },
+            avgRating: { $avg: '$rating' },
+          },
+        },
+      ]),
+      // 5 most recent listings with light projection
+      Listing.find()
+        .sort({ createdAt: -1 })
+        .limit(5)
+        .select('title address type gender rent status isVerified isFeatured photos createdAt')
+        .populate('owner', 'name email phone')
+        .lean(),
     ]);
+
+    const lFacet = listingStats[0] || {};
+    const uFacet = userStats[0] || {};
+    const bFacet = bookingStats[0] || {};
+    const pFacet = paymentStats[0] || {};
+    const rData = reviewStats[0] || { totalReviews: 0, avgRating: 4.8 };
+
+    const kpis = {
+      totalProperties: lFacet.total?.[0]?.count || 0,
+      pendingProperties: lFacet.pending?.[0]?.count || 0,
+      activeProperties: lFacet.active?.[0]?.count || 0,
+      rejectedProperties: lFacet.rejected?.[0]?.count || 0,
+      draftProperties: lFacet.draft?.[0]?.count || 0,
+      verifiedProperties: lFacet.verified?.[0]?.count || 0,
+      featuredProperties: lFacet.featured?.[0]?.count || 0,
+      totalUsers: uFacet.total?.[0]?.count || 0,
+      totalOwners: uFacet.owners?.[0]?.count || 0,
+      totalSeekers: uFacet.seekers?.[0]?.count || 0,
+      totalAdmins: uFacet.admins?.[0]?.count || 0,
+      verifiedOwners: uFacet.verified?.[0]?.count || 0,
+      totalBookings: bFacet.total?.[0]?.count || 0,
+      pendingBookings: bFacet.pending?.[0]?.count || 0,
+      confirmedBookings: bFacet.confirmed?.[0]?.count || 0,
+      cancelledBookings: bFacet.cancelled?.[0]?.count || 0,
+      totalRevenue: pFacet.totalVolume?.[0]?.total || 0,
+      monthlyRevenue: pFacet.thisMonth?.[0]?.total || 0,
+      totalReviews: rData.totalReviews || 0,
+      avgRating: Number((rData.avgRating || 4.8).toFixed(1)),
+    };
 
     return success(res, {
       message: 'Admin stats fetched successfully.',
       data: {
-        kpis: {
-          totalProperties,
-          pendingProperties,
-          activeProperties,
-          rejectedProperties,
-          totalUsers,
-          totalOwners,
-          totalSeekers,
-          totalBookings,
-          pendingBookings,
-          totalReviews,
-        },
+        kpis,
         recentProperties,
       },
     });
@@ -64,38 +163,223 @@ const getDashboardStats = async (req, res, next) => {
 
 // ─── GET /api/admin/listings ──────────────────────────────────────────────────
 /**
- * All listings — including inactive and unverified.
- * Supports filtering by status and verification.
+ * All listings with single-pass aggregation facet.
+ * Retrieves paginated data, status breakdown counts, and total in ONE query.
  */
 const getAllListings = async (req, res, next) => {
   try {
-    const { status, isVerified, page = 1, limit = 20, area } = req.query;
+    const {
+      status,
+      isVerified,
+      isFeatured,
+      type,
+      gender,
+      city,
+      area,
+      search,
+      page = 1,
+      limit = 100,
+      sortBy = 'createdAt',
+      sortOrder = 'desc',
+    } = req.query;
 
-    const filter = {};
-    if (status) filter.status = status;
-    if (isVerified !== undefined) filter.isVerified = isVerified === 'true';
-    if (area) filter['address.area'] = { $regex: area, $options: 'i' };
+    const matchQuery = {};
+
+    if (status && status !== 'all') {
+      matchQuery.status = status;
+    }
+    if (isVerified !== undefined && isVerified !== '') {
+      matchQuery.isVerified = isVerified === 'true';
+    }
+    if (isFeatured !== undefined && isFeatured !== '') {
+      matchQuery.isFeatured = isFeatured === 'true';
+    }
+    if (type && type !== 'all') {
+      matchQuery.type = type.toLowerCase();
+    }
+    if (gender && gender !== 'all') {
+      matchQuery.gender = gender.toLowerCase();
+    }
+    if (city) {
+      matchQuery['address.city'] = { $regex: city, $options: 'i' };
+    }
+    if (area) {
+      matchQuery['address.area'] = { $regex: area, $options: 'i' };
+    }
+    if (search) {
+      matchQuery.$or = [
+        { title: { $regex: search, $options: 'i' } },
+        { 'address.area': { $regex: search, $options: 'i' } },
+        { 'address.city': { $regex: search, $options: 'i' } },
+      ];
+    }
 
     const pageNum = Math.max(1, Number(page));
-    const limitNum = Math.min(100, Number(limit));
+    const limitNum = Math.min(1000, Math.max(1, Number(limit)));
     const skip = (pageNum - 1) * limitNum;
+    const sortDirection = sortOrder === 'asc' ? 1 : -1;
+    const sortObj = { [sortBy]: sortDirection };
 
-    const [listings, total] = await Promise.all([
-      Listing.find(filter)
-        .sort({ createdAt: -1 })
-        .skip(skip)
-        .limit(limitNum)
-        .populate('owner', 'name email phone')
-        .lean(),
-      Listing.countDocuments(filter),
+    const [result] = await Listing.aggregate([
+      { $match: matchQuery },
+      {
+        $facet: {
+          paginatedResults: [
+            { $sort: sortObj },
+            { $skip: skip },
+            { $limit: limitNum },
+            {
+              $lookup: {
+                from: 'users',
+                localField: 'owner',
+                foreignField: '_id',
+                as: 'ownerDoc',
+                pipeline: [{ $project: { name: 1, email: 1, phone: 1, avatar: 1, isVerified: 1 } }],
+              },
+            },
+            {
+              $addFields: {
+                owner: { $arrayElemAt: ['$ownerDoc', 0] },
+              },
+            },
+            {
+              $project: {
+                ownerDoc: 0,
+              },
+            },
+          ],
+          totalCount: [{ $count: 'count' }],
+        },
+      },
     ]);
+
+    const listings = result?.paginatedResults || [];
+    const total = result?.totalCount?.[0]?.count || 0;
 
     return success(res, {
       message: 'Admin: All listings fetched.',
       data: { listings },
-      pagination: { total, page: pageNum, limit: limitNum, totalPages: Math.ceil(total / limitNum) },
+      pagination: {
+        total,
+        page: pageNum,
+        limit: limitNum,
+        totalPages: Math.ceil(total / limitNum),
+      },
     });
   } catch (err) {
+    next(err);
+  }
+};
+
+// ─── GET /api/admin/listings/:id ──────────────────────────────────────────────
+/**
+  * Full listing details for admin inspection and editing.
+  */
+const getListingById = async (req, res, next) => {
+  try {
+    const listing = await Listing.findById(req.params.id)
+      .populate('owner', 'name email phone avatar isVerified role')
+      .populate('verifiedBy', 'name email')
+      .lean();
+
+    if (!listing) {
+      return error(res, { message: 'Listing not found.', statusCode: 404 });
+    }
+
+    // Fetch related room inventory and audit logs in parallel
+    const [rooms, auditLogs] = await Promise.all([
+      RoomInventory.find({ propertyId: listing._id }).lean(),
+      AuditLog.find({ targetId: listing._id }).sort({ createdAt: -1 }).limit(20).populate('actor', 'name email').lean(),
+    ]);
+
+    return success(res, {
+      message: 'Listing fetched successfully.',
+      data: { listing, rooms, auditLogs },
+    });
+  } catch (err) {
+    next(err);
+  }
+};
+
+// ─── PUT /api/admin/listings/:id ──────────────────────────────────────────────
+/**
+  * Full in-place edit of property fields by Admin.
+  */
+const updateListing = async (req, res, next) => {
+  const session = await mongoose.startSession();
+  session.startTransaction();
+  try {
+    const listing = await Listing.findById(req.params.id).session(session);
+    if (!listing) {
+      await session.abortTransaction();
+      session.endSession();
+      return error(res, { message: 'Listing not found.', statusCode: 404 });
+    }
+
+    const beforeState = listing.toObject();
+    const updateData = req.body;
+
+    // Fields that admin can update
+    const allowedFields = [
+      'title',
+      'type',
+      'gender',
+      'description',
+      'address',
+      'rent',
+      'deposit',
+      'amenities',
+      'rules',
+      'photos',
+      'ownerWhatsapp',
+      'status',
+      'isVerified',
+      'isFeatured',
+      'totalRooms',
+      'availableRooms',
+      'roomTypes',
+      'seo',
+      'rejectionReason',
+    ];
+
+    allowedFields.forEach((field) => {
+      if (updateData[field] !== undefined) {
+        listing[field] = updateData[field];
+      }
+    });
+
+    if (updateData.isVerified === true && !listing.verifiedAt) {
+      listing.verifiedAt = new Date();
+      listing.verifiedBy = req.user._id;
+    }
+
+    await listing.save({ session });
+
+    // Log admin action with diff summary
+    await logAdminAction({
+      actor: req.user._id,
+      action: 'listing_edited',
+      targetType: 'Listing',
+      targetId: listing._id,
+      details: {
+        updatedFields: Object.keys(updateData),
+        previousTitle: beforeState.title,
+        newTitle: listing.title,
+      },
+      req,
+      session,
+    });
+
+    await session.commitTransaction();
+    session.endSession();
+
+    return success(res, {
+      message: 'Listing updated successfully by Admin.',
+      data: { listing },
+    });
+  } catch (err) {
+    await session.abortTransaction();
+    session.endSession();
     next(err);
   }
 };
@@ -105,9 +389,13 @@ const getAllListings = async (req, res, next) => {
  * Toggle isVerified & confirm on-site Direct UPI verification payment (₹299).
  */
 const verifyListing = async (req, res, next) => {
+  const session = await mongoose.startSession();
+  session.startTransaction();
   try {
-    const listing = await Listing.findById(req.params.id);
+    const listing = await Listing.findById(req.params.id).session(session);
     if (!listing) {
+      await session.abortTransaction();
+      session.endSession();
       return error(res, { message: 'Listing not found.', statusCode: 404 });
     }
 
@@ -135,108 +423,142 @@ const verifyListing = async (req, res, next) => {
 
       // Record ₹299 Direct UPI payment transaction
       try {
-        await Payment.create({
-          orderId: `order_onsite_${Date.now()}`,
-          paymentId: upiPaymentRef,
-          user: listing.owner,
-          listing: listing._id,
-          type: 'verification_service',
-          amount: 299,
-          currency: 'INR',
-          status: 'paid',
-          gateway: 'Direct UPI (On-Site)',
-          paidAt: new Date(),
-          metadata: {
-            verifiedByAdmin: req.user._id,
-            verifiedAt: new Date().toISOString(),
-            method: 'Direct UPI On-Site Audit',
-          },
-        });
+        await Payment.create(
+          [
+            {
+              orderId: `order_onsite_${Date.now()}`,
+              paymentId: upiPaymentRef,
+              user: listing.owner,
+              listing: listing._id,
+              type: 'verification_service',
+              amount: 299,
+              currency: 'INR',
+              status: 'paid',
+              gateway: 'Direct UPI (On-Site)',
+              paidAt: new Date(),
+              metadata: {
+                verifiedByAdmin: req.user._id,
+                verifiedAt: new Date().toISOString(),
+                method: 'Direct UPI On-Site Audit',
+              },
+            },
+          ],
+          { session }
+        );
       } catch (payErr) {
         console.warn('[Payment] Failed to record On-Site UPI transaction:', payErr.message);
-      }
-
-      // Notify owner of on-site verification completion
-      try {
-        await createNotification({
-          recipient: listing.owner,
-          category: 'Verification',
-          type: 'listing.verified',
-          title: 'Property Verified On-Site! 🛡️',
-          message: `Your property "${listing.title}" has been physically audited by our ground team and ₹299 Direct UPI payment was confirmed. The Assured badge is now active for 6 months!`,
-          actionUrl: `/property/${listing._id}`,
-        });
-      } catch (notifErr) {
-        console.warn('[Notification] Dispatch failed:', notifErr.message);
       }
     } else if (listing.verificationService) {
       listing.verificationService.verifiedAt = null;
       listing.verificationService.expiresAt = null;
     }
-    await listing.save();
+
+    await listing.save({ session });
+
+    await logAdminAction({
+      actor: req.user._id,
+      action: isNowVerified ? 'listing_verified' : 'listing_unverified',
+      targetType: 'Listing',
+      targetId: listing._id,
+      details: { isVerified: isNowVerified },
+      req,
+      session,
+    });
+
+    await session.commitTransaction();
+    session.endSession();
+
+    if (isNowVerified) {
+      createNotification({
+        recipient: listing.owner,
+        category: 'Verification',
+        type: 'listing.verified',
+        title: 'Property Verified On-Site! 🛡️',
+        message: `Your property "${listing.title}" has been verified and marked Assured for 6 months!`,
+        actionUrl: `/property/${listing._id}`,
+      }).catch(() => {});
+    }
 
     return success(res, {
-      message: `Listing ${listing.isVerified ? 'verified (Assured — ₹299 On-Site UPI Paid)' : 'unverified'} successfully.`,
+      message: `Listing ${listing.isVerified ? 'verified (Assured)' : 'unverified'} successfully.`,
       data: { listing },
     });
   } catch (err) {
+    await session.abortTransaction();
+    session.endSession();
     next(err);
   }
 };
 
 // ─── PUT /api/admin/listings/:id/status ──────────────────────────────────────
 /**
- * Set listing status — active / inactive / deleted.
+ * Set listing status — active (approved) / pending / inactive (suspended) / rejected / deleted.
  */
 const setListingStatus = async (req, res, next) => {
+  const session = await mongoose.startSession();
+  session.startTransaction();
   try {
-    const { status } = req.body;
+    const { status, rejectionReason } = req.body;
     const allowedStatuses = ['pending', 'active', 'inactive', 'rejected', 'deleted'];
     if (!allowedStatuses.includes(status)) {
+      await session.abortTransaction();
+      session.endSession();
       return error(res, { message: `Invalid status. Must be one of: ${allowedStatuses.join(', ')}`, statusCode: 400 });
     }
 
-    const updateFields = { status };
-    if (status === 'active') {
-      updateFields.isVerified = true;
-      updateFields.verifiedAt = new Date();
-      updateFields.verifiedBy = req.user._id;
-    } else if (status === 'rejected') {
-      updateFields.isVerified = false;
-    }
-
-    const listing = await Listing.findByIdAndUpdate(
-      req.params.id,
-      { $set: updateFields },
-      { new: true }
-    );
-
+    const listing = await Listing.findById(req.params.id).session(session);
     if (!listing) {
+      await session.abortTransaction();
+      session.endSession();
       return error(res, { message: 'Listing not found.', statusCode: 404 });
     }
 
-    // ── Notify Property Owner of Status Change ──
+    const prevStatus = listing.status;
+    listing.status = status;
+
+    if (status === 'active') {
+      listing.isVerified = true;
+      listing.verifiedAt = new Date();
+      listing.verifiedBy = req.user._id;
+      listing.rejectionReason = '';
+    } else if (status === 'rejected') {
+      listing.isVerified = false;
+      listing.rejectionReason = rejectionReason || 'Property details require correction.';
+    }
+
+    await listing.save({ session });
+
+    await logAdminAction({
+      actor: req.user._id,
+      action: `listing_status_${status}`,
+      targetType: 'Listing',
+      targetId: listing._id,
+      details: { prevStatus, newStatus: status, rejectionReason: listing.rejectionReason },
+      req,
+      session,
+    });
+
+    await session.commitTransaction();
+    session.endSession();
+
+    // Notify owner
     if (listing.owner) {
-      let notifType = 'property.rejected';
       let notifTitle = 'Property Listing Status Updated';
-      let notifMessage = `Your property listing "${listing.title}" status has been set to '${status}'.`;
+      let notifMessage = `Your property listing "${listing.title}" status is now '${status}'.`;
+      let notifType = 'property.updated';
 
       if (status === 'active') {
         notifType = 'property.approved';
         notifTitle = 'Property Listing Approved! 🎉';
-        notifMessage = `Your property "${listing.title}" has been reviewed, approved, and is now live on RoofOnClick!`;
+        notifMessage = `Your property "${listing.title}" has been reviewed, approved, and is now live!`;
       } else if (status === 'rejected') {
         notifType = 'property.rejected';
-        notifTitle = 'Property Listing Rejected';
-        notifMessage = `Your property listing "${listing.title}" was reviewed and rejected. Please review listing guidelines.`;
+        notifTitle = 'Property Listing Requires Changes';
+        notifMessage = `Your property listing "${listing.title}" was not approved: ${listing.rejectionReason}`;
       } else if (status === 'inactive') {
         notifType = 'property.suspended';
-        notifTitle = 'Property Listing Suspended ⚠️';
-        notifMessage = `Your property listing "${listing.title}" has been suspended by platform administration.`;
-      } else if (status === 'deleted') {
-        notifType = 'property.deleted';
-        notifTitle = 'Property Listing Removed';
-        notifMessage = `Your property listing "${listing.title}" has been removed from RoofOnClick.`;
+        notifTitle = 'Property Listing Suspended';
+        notifMessage = `Your property listing "${listing.title}" has been temporarily suspended.`;
       }
 
       createNotification({
@@ -247,33 +569,92 @@ const setListingStatus = async (req, res, next) => {
         title: notifTitle,
         message: notifMessage,
         actionUrl: '/owner/dashboard',
-        metadata: {
-          listingId: listing._id,
-          title: listing.title,
-          status,
-          isVerified: listing.isVerified,
-        },
-      });
+      }).catch(() => {});
     }
 
-    return success(res, { message: `Listing status updated to '${status}'.`, data: { listing } });
+    return success(res, {
+      message: `Listing status updated to '${status}'.`,
+      data: { listing },
+    });
   } catch (err) {
+    await session.abortTransaction();
+    session.endSession();
+    next(err);
+  }
+};
+
+// ─── PATCH /api/admin/listings/:id/reassign-owner ─────────────────────────────
+/**
+ * Reassign property to another owner.
+ */
+const reassignListingOwner = async (req, res, next) => {
+  const session = await mongoose.startSession();
+  session.startTransaction();
+  try {
+    const { newOwnerId } = req.body;
+    if (!newOwnerId) {
+      await session.abortTransaction();
+      session.endSession();
+      return error(res, { message: 'newOwnerId is required.', statusCode: 400 });
+    }
+
+    const [listing, newOwner] = await Promise.all([
+      Listing.findById(req.params.id).session(session),
+      User.findById(newOwnerId).session(session),
+    ]);
+
+    if (!listing) {
+      await session.abortTransaction();
+      session.endSession();
+      return error(res, { message: 'Listing not found.', statusCode: 404 });
+    }
+    if (!newOwner) {
+      await session.abortTransaction();
+      session.endSession();
+      return error(res, { message: 'New owner user account not found.', statusCode: 404 });
+    }
+
+    const previousOwnerId = listing.owner;
+    listing.owner = newOwner._id;
+    await listing.save({ session });
+
+    await logAdminAction({
+      actor: req.user._id,
+      action: 'listing_owner_reassigned',
+      targetType: 'Listing',
+      targetId: listing._id,
+      details: { previousOwnerId, newOwnerId: newOwner._id },
+      req,
+      session,
+    });
+
+    await session.commitTransaction();
+    session.endSession();
+
+    return success(res, {
+      message: `Listing ownership transferred to ${newOwner.name || newOwner.email}.`,
+      data: { listing },
+    });
+  } catch (err) {
+    await session.abortTransaction();
+    session.endSession();
     next(err);
   }
 };
 
 // ─── GET /api/admin/users ─────────────────────────────────────────────────────
 /**
- * All users with pagination and computed metrics.
+ * All users with single-pass facet aggregation.
  */
 const getAllUsers = async (req, res, next) => {
   try {
-    const { page = 1, limit = 50, role, search } = req.query;
+    const { page = 1, limit = 50, role, search, status } = req.query;
 
-    const filter = {};
-    if (role) filter.role = role;
+    const matchQuery = {};
+    if (role && role !== 'all') matchQuery.role = role;
+    if (status && status !== 'all') matchQuery.status = status;
     if (search) {
-      filter.$or = [
+      matchQuery.$or = [
         { name: { $regex: search, $options: 'i' } },
         { email: { $regex: search, $options: 'i' } },
         { phone: { $regex: search, $options: 'i' } },
@@ -284,85 +665,125 @@ const getAllUsers = async (req, res, next) => {
     const limitNum = Math.min(100, Number(limit));
     const skip = (pageNum - 1) * limitNum;
 
-    const [users, total] = await Promise.all([
-      User.find(filter)
-        .select('-password')
-        .sort({ createdAt: -1 })
-        .skip(skip)
-        .limit(limitNum)
-        .lean(),
-      User.countDocuments(filter),
+    const [result] = await User.aggregate([
+      { $match: matchQuery },
+      {
+        $facet: {
+          paginatedResults: [
+            { $sort: { createdAt: -1 } },
+            { $skip: skip },
+            { $limit: limitNum },
+            {
+              $project: {
+                password: 0,
+              },
+            },
+          ],
+          totalCount: [{ $count: 'count' }],
+        },
+      },
     ]);
 
-    // Attach computed metrics (propertiesCount, bookingsCount, totalRevenue)
-    const enrichedUsers = await Promise.all(
-      users.map(async (u) => {
-        if (u.role === 'owner') {
-          const ownerListings = await Listing.find({ owner: u._id }).select('_id rent status title').lean();
-          const listingIds = ownerListings.map((l) => l._id);
-          const [bookingsCount, reviews] = await Promise.all([
-            Booking.countDocuments({ property: { $in: listingIds } }),
-            Review.find({ property: { $in: listingIds } }).select('rating').lean(),
-          ]);
-          const avgRating = reviews.length > 0
-            ? Number((reviews.reduce((acc, r) => acc + (r.rating || 5), 0) / reviews.length).toFixed(1))
-            : 4.8;
-          const totalRevenue = ownerListings.reduce((sum, l) => sum + (l.rent || 0), 0);
-
-          return {
-            ...u,
-            propertiesCount: ownerListings.length,
-            bookingsCount,
-            avgRating,
-            totalRevenue,
-            occupancyRate: ownerListings.length > 0 ? 85 : 0,
-            properties: ownerListings.map((l) => ({
-              id: l._id.toString(),
-              title: l.title,
-              type: 'Coliving',
-              rent: l.rent || 0,
-              occupancy: 90,
-              status: l.status,
-            })),
-          };
-        } else {
-          const [userBookings, userReviews] = await Promise.all([
-            Booking.find({ user: u._id }).select('_id rent status moveInDate property').populate('property', 'title rent').lean(),
-            Review.find({ user: u._id }).select('_id rating comment createdAt property').populate('property', 'title').lean(),
-          ]);
-          const totalSpent = userBookings.reduce((sum, b) => sum + (b.rent || 0), 0);
-
-          return {
-            ...u,
-            bookingsCount: userBookings.length,
-            reviewsCount: userReviews.length,
-            wishlistCount: (u.savedListings || []).length,
-            lifetimeValue: totalSpent,
-            bookings: userBookings.map((b) => ({
-              id: b._id.toString(),
-              propertyTitle: b.property?.title || 'Accommodation Booking',
-              roomType: 'Single Room',
-              moveInDate: b.moveInDate ? new Date(b.moveInDate).toISOString().split('T')[0] : '2026-08-01',
-              rent: b.rent || 0,
-              deposit: 5000,
-              status: b.status === 'confirmed' ? 'Active' : b.status === 'cancelled' ? 'Cancelled' : 'Completed',
-            })),
-            reviews: userReviews.map((r) => ({
-              id: r._id.toString(),
-              propertyTitle: r.property?.title || 'Indore Property',
-              rating: r.rating || 5,
-              comment: r.comment || '',
-              date: r.createdAt ? new Date(r.createdAt).toISOString().split('T')[0] : '2026-08-01',
-            })),
-          };
-        }
-      })
-    );
+    const users = result?.paginatedResults || [];
+    const total = result?.totalCount?.[0]?.count || 0;
 
     return success(res, {
       message: 'Admin: All users fetched.',
-      data: { users: enrichedUsers },
+      data: { users },
       pagination: { total, page: pageNum, limit: limitNum, totalPages: Math.ceil(total / limitNum) },
+    });
+  } catch (err) {
+    next(err);
+  }
+};
+
+// ─── GET /api/admin/audit-logs ────────────────────────────────────────────────
+/**
+ * Fetch paginated audit logs.
+ */
+const getAuditLogs = async (req, res, next) => {
+  try {
+    const { page = 1, limit = 50, targetType, action } = req.query;
+    const filter = {};
+    if (targetType) filter.targetType = targetType;
+    if (action) filter.action = action;
+
+    const pageNum = Math.max(1, Number(page));
+    const limitNum = Math.min(100, Number(limit));
+    const skip = (pageNum - 1) * limitNum;
+
+    const [logs, total] = await Promise.all([
+      AuditLog.find(filter)
+        .sort({ createdAt: -1 })
+        .skip(skip)
+        .limit(limitNum)
+        .populate('actor', 'name email role')
+        .lean(),
+      AuditLog.countDocuments(filter),
+    ]);
+
+    return success(res, {
+      message: 'Audit logs fetched.',
+      data: { logs },
+      pagination: { total, page: pageNum, limit: limitNum, totalPages: Math.ceil(total / limitNum) },
+    });
+  } catch (err) {
+    next(err);
+  }
+};
+
+// ─── GET /api/admin/system/settings ───────────────────────────────────────────
+/**
+ * Get all system settings.
+ */
+const getSystemSettings = async (req, res, next) => {
+  try {
+    const settings = await SystemSetting.find().lean();
+    return success(res, {
+      message: 'System settings fetched.',
+      data: { settings },
+    });
+  } catch (err) {
+    next(err);
+  }
+};
+
+// ─── PUT /api/admin/system/settings ───────────────────────────────────────────
+/**
+ * Upsert system setting.
+ */
+const updateSystemSetting = async (req, res, next) => {
+  try {
+    const { key, value, category, description } = req.body;
+    if (!key) {
+      return error(res, { message: 'Setting key is required.', statusCode: 400 });
+    }
+
+    const setting = await SystemSetting.findOneAndUpdate(
+      { key },
+      {
+        $set: {
+          value,
+          category: category || 'general',
+          description: description || '',
+          updatedBy: req.user._id,
+        },
+      },
+      { upsert: true, new: true }
+    );
+
+    await logAdminAction({
+      actor: req.user._id,
+      action: 'system_setting_updated',
+      targetType: 'SystemSetting',
+      targetId: setting._id,
+      details: { key, value },
+      req,
+    });
+
+    return success(res, {
+      message: `Setting '${key}' updated successfully.`,
+      data: { setting },
     });
   } catch (err) {
     next(err);
@@ -811,65 +1232,50 @@ const getAllReviews = async (req, res, next) => {
 
 // ─── GET /api/admin/finance/stats ─────────────────────────────────────────────
 /**
- * Aggregate financial volume, commission, settlements, and trends.
+ * Aggregate owner subscription revenue, trial vs paid plans, verification revenue, and trends.
  */
 const getFinanceStats = async (req, res, next) => {
   try {
-    const bookings = await Booking.find().select('pricing status paymentStatus createdAt refund').lean();
-    const paidBookings = bookings.filter((b) => b.paymentStatus === 'paid' || b.status === 'confirmed' || b.status === 'completed');
-    const refundedBookings = bookings.filter((b) => b.paymentStatus === 'refunded' || b.status === 'refunded');
+    const now = new Date();
+    const startOfToday = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+    const startOfMonth = new Date(now.getFullYear(), now.getMonth(), 1);
 
-    const grossVolume = paidBookings.reduce((sum, b) => sum + (b.pricing?.totalDueNow || b.pricing?.monthlyRent || 0), 0);
-    const platformCommission = Math.round(grossVolume * 0.05);
-    const refundVolume = refundedBookings.reduce((sum, b) => sum + (b.refund?.amount || b.pricing?.totalDueNow || 0), 0);
-    const pendingSettlements = bookings.filter((b) => b.status === 'pending' || b.paymentStatus === 'pending').length;
-    const completedSettlements = paidBookings.length;
+    const [payments, listings] = await Promise.all([
+      Payment.find({ status: 'paid' }).populate('user listing').lean(),
+      Listing.find().select('subscription verificationService status').lean(),
+    ]);
 
-    const chartMonths = ['Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug'];
-    const revenueTrendData = chartMonths.map((month, idx) => ({
-      date: `2026-0${idx + 3}-01`,
-      value: Math.round(grossVolume * (0.6 + idx * 0.08)),
-    }));
-    const commissionTrendData = revenueTrendData.map((d) => ({
-      date: d.date,
-      value: Math.round(d.value * 0.05),
-    }));
+    const subscriptionPayments = payments.filter((p) => p.type === 'listing_subscription' || p.amount >= 999);
+    const verificationPayments = payments.filter((p) => p.type === 'verification_service' || p.amount === 299);
+
+    const totalSubscriptionRevenue = subscriptionPayments.reduce((sum, p) => sum + (p.amount || 0), 0);
+    const totalVerificationRevenue = verificationPayments.reduce((sum, p) => sum + (p.amount || 0), 0);
+    const totalRevenue = totalSubscriptionRevenue + totalVerificationRevenue;
+
+    const paidToday = payments.filter((p) => p.createdAt && new Date(p.createdAt) >= startOfToday);
+    const paidThisMonth = payments.filter((p) => p.createdAt && new Date(p.createdAt) >= startOfMonth);
+
+    const todaysRevenue = paidToday.reduce((sum, p) => sum + (p.amount || 0), 0);
+    const monthlyRevenue = paidThisMonth.reduce((sum, p) => sum + (p.amount || 0), 0);
+
+    const activeSubscriptions = listings.filter((l) => l.subscription?.status === 'active' || l.subscription?.paymentStatus === 'paid').length;
+    const trialSubscriptions = listings.filter((l) => l.subscription?.status === 'trial' || l.subscription?.paymentStatus === 'trial').length;
+    const expiredSubscriptions = listings.filter((l) => l.subscription?.status === 'expired').length;
+    const verifiedProperties = listings.filter((l) => l.verificationService?.paymentStatus === 'paid').length;
 
     return success(res, {
-      message: 'Financial statistics computed successfully.',
+      message: 'Owner subscription financial statistics computed.',
       data: {
         kpis: {
-          todaysRevenue: Math.round(grossVolume * 0.1),
-          monthlyRevenue: grossVolume,
-          platformCommission,
-          pendingSettlements,
-          completedSettlements,
-          refundRequests: refundedBookings.length,
-          failedPayments: 0,
-          outstandingPayments: pendingSettlements,
-        },
-        charts: {
-          monthlyRevenue: {
-            id: 'revenue',
-            title: 'Gross Transaction Volume (GTV)',
-            subtitle: 'Total booking payments processed across all properties',
-            color: 'hsl(217, 91%, 60%)',
-            data: revenueTrendData,
-          },
-          platformCommission: {
-            id: 'commission',
-            title: 'Platform Revenue (5% Commission)',
-            subtitle: 'Commission collected from settlements',
-            color: 'hsl(142, 71%, 45%)',
-            data: commissionTrendData,
-          },
-          refunds: {
-            id: 'refunds',
-            title: 'Refunds Processed',
-            subtitle: 'Total refund volume issued to buyers',
-            color: 'hsl(0, 84%, 60%)',
-            data: [{ date: '2026-08-01', value: refundVolume }],
-          },
+          todaysRevenue,
+          monthlyRevenue,
+          totalSubscriptionRevenue,
+          totalVerificationRevenue,
+          totalRevenue,
+          activeSubscriptions,
+          trialSubscriptions,
+          expiredSubscriptions,
+          verifiedProperties,
         },
       },
     });
@@ -880,7 +1286,7 @@ const getFinanceStats = async (req, res, next) => {
 
 // ─── GET /api/admin/finance/transactions ──────────────────────────────────────
 /**
- * Paginated financial transactions mapped from real platform bookings.
+ * Paginated list of owner subscription and verification payment transactions.
  */
 const getFinanceTransactions = async (req, res, next) => {
   try {
@@ -889,76 +1295,43 @@ const getFinanceTransactions = async (req, res, next) => {
     const limitNum = Math.min(100, Number(limit));
     const skip = (pageNum - 1) * limitNum;
 
-    const [bookings, total] = await Promise.all([
-      Booking.find()
+    const filter = {};
+    if (status && status !== 'all') filter.status = status;
+
+    const [payments, total] = await Promise.all([
+      Payment.find(filter)
         .sort({ createdAt: -1 })
         .skip(skip)
         .limit(limitNum)
-        .populate('property', 'title address owner')
-        .populate('user', 'name email phone')
+        .populate('user', 'name email phone role')
+        .populate('listing', 'title address type')
         .lean(),
-      Booking.countDocuments(),
+      Payment.countDocuments(filter),
     ]);
 
-    const transactions = bookings.map((b, idx) => {
-      const grossAmount = b.pricing?.totalDueNow || (b.pricing?.monthlyRent || 0);
-      const commission = Math.round(grossAmount * 0.05);
-      const ownerEarnings = grossAmount - commission;
-      const statusValue = b.status === 'refunded' || b.paymentStatus === 'refunded'
-        ? 'Refunded'
-        : b.status === 'confirmed' || b.status === 'completed'
-        ? 'Settled'
-        : 'Pending';
+    const transactions = payments.map((p) => {
+      const isVerif = p.type === 'verification_service' || p.amount === 299;
+      const typeLabel = isVerif ? 'On-Site Verification (₹299)' : 'Owner Listing Plan (₹5,999/yr)';
 
       return {
-        id: `TXN-${b.reservationId || b._id.toString().substring(0, 8).toUpperCase()}`,
-        bookingId: b.reservationId || b._id.toString(),
-        mongoBookingId: b._id.toString(),
-        buyerName: b.guestDetails?.fullName || b.user?.name || 'Resident Guest',
-        buyerEmail: b.guestDetails?.email || b.user?.email || 'N/A',
-        buyerPhone: b.guestDetails?.phone || b.user?.phone || 'N/A',
-        ownerName: b.property?.owner?.name || 'Property Owner',
-        ownerPhone: b.property?.owner?.phone || 'N/A',
-        bankAccount: '•••• •••• 8842',
-        propertyTitle: b.propertyName || b.property?.title || 'Indore Property',
-        city: b.property?.address?.city || 'Indore',
-        amount: grossAmount,
-        platformFee: commission,
-        ownerEarnings,
-        paymentMethod: 'UPI',
-        gateway: 'Razorpay',
-        gatewayRef: `pay_${b._id.toString().substring(0, 14)}`,
-        status: statusValue,
-        createdAt: b.createdAt ? new Date(b.createdAt).toISOString().split('T')[0] : '2026-08-15',
-        settlementDetails: {
-          settlementId: `SET-${1000 + idx}`,
-          settlementStatus: statusValue === 'Settled' ? 'Settled' : 'Pending',
-          settlementDate: b.createdAt ? new Date(b.createdAt).toISOString().split('T')[0] : '2026-08-15',
-          bankName: 'HDFC Bank',
-          accountNo: '•••• •••• 8842',
-          ifscCode: 'HDFC0001234',
-        },
-        refundDetails: b.refund?.status === 'refunded' ? {
-          refundId: b.refund.txnId || `REF-${1000 + idx}`,
-          refundAmount: b.refund.amount || grossAmount,
-          reason: b.refund.reason || 'Admin approved refund',
-          requestedAt: b.refund.processedAt ? new Date(b.refund.processedAt).toISOString().split('T')[0] : '2026-08-15',
-          status: 'Processed',
-        } : undefined,
-        timeline: [
-          {
-            event: 'Payment Initiated',
-            description: `Payment of ₹${grossAmount} for booking ${b.reservationId || b._id}`,
-            date: b.createdAt ? new Date(b.createdAt).toISOString().split('T')[0] : '2026-08-15',
-          },
-        ],
-        documents: [],
-        internalNotes: [],
+        id: p._id.toString(),
+        orderId: p.orderId,
+        paymentId: p.paymentId || p.orderId,
+        ownerName: p.user?.name || 'Property Owner',
+        ownerEmail: p.user?.email || 'N/A',
+        ownerPhone: p.user?.phone || 'N/A',
+        propertyTitle: p.listing?.title || (isVerif ? 'Physical Audit Service' : 'Annual Plan Subscription'),
+        city: p.listing?.address?.city || 'Indore',
+        planType: typeLabel,
+        amount: p.amount,
+        status: p.status === 'paid' ? 'Paid' : p.status === 'failed' ? 'Failed' : 'Pending',
+        gateway: p.gateway || 'Razorpay',
+        createdAt: p.createdAt ? new Date(p.createdAt).toLocaleDateString() : 'N/A',
       };
     });
 
     return success(res, {
-      message: 'Financial transactions fetched successfully.',
+      message: 'Owner subscription transactions fetched.',
       data: { transactions },
       pagination: { total, page: pageNum, limit: limitNum, totalPages: Math.ceil(total / limitNum) },
     });
@@ -1204,8 +1577,11 @@ const deleteAdminReview = async (req, res, next) => {
 module.exports = {
   getDashboardStats,
   getAllListings,
+  getListingById,
+  updateListing,
   verifyListing,
   setListingStatus,
+  reassignListingOwner,
   getAllUsers,
   setUserRole,
   updateUserStatus,
@@ -1231,4 +1607,8 @@ module.exports = {
   getAllReviews,
   updateAdminReviewStatus,
   deleteAdminReview,
+  getAuditLogs,
+  getSystemSettings,
+  updateSystemSetting,
 };
+

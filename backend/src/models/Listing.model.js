@@ -224,6 +224,15 @@ const listingSchema = new mongoose.Schema(
       type: Boolean,
       default: false, // Admin sets to true → "Assured" badge
     },
+    isFeatured: {
+      type: Boolean,
+      default: false,
+    },
+    rejectionReason: {
+      type: String,
+      default: '',
+      trim: true,
+    },
     verifiedAt: {
       type: Date,
       default: null,
@@ -347,10 +356,12 @@ listingSchema.index({ 'address.coordinates': '2dsphere' });
 // Compound index for common filter combinations — city is the leading key
 listingSchema.index({ 'address.city': 1, 'address.area': 1, 'rent.monthly': 1, gender: 1 });
 
-// Additional indexes for filtering
+// Additional indexes for admin and general filtering
 listingSchema.index({ type: 1, status: 1 });
-listingSchema.index({ isVerified: 1 });
-listingSchema.index({ owner: 1 });
+listingSchema.index({ status: 1, createdAt: -1 });
+listingSchema.index({ isVerified: 1, status: 1 });
+listingSchema.index({ isFeatured: 1, status: 1 });
+listingSchema.index({ owner: 1, status: 1 });
 
 // Text search index on title, description, area
 listingSchema.index(

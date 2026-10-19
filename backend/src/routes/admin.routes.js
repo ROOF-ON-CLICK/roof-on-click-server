@@ -3,8 +3,11 @@ const { verifyToken, requireRole } = require('../middleware/auth.middleware');
 const {
   getDashboardStats,
   getAllListings,
+  getListingById,
+  updateListing,
   verifyListing,
   setListingStatus,
+  reassignListingOwner,
   getAllUsers,
   setUserRole,
   updateUserStatus,
@@ -30,6 +33,9 @@ const {
   getAllReviews,
   updateAdminReviewStatus,
   deleteAdminReview,
+  getAuditLogs,
+  getSystemSettings,
+  updateSystemSetting,
 } = require('../controllers/admin.controller');
 
 const router = express.Router();
@@ -43,8 +49,11 @@ router.get('/stats', getDashboardStats);
 
 // ─── Listings ─────────────────────────────────────────────────────────────────
 router.get('/listings', getAllListings);
+router.get('/listings/:id', getListingById);
+router.put('/listings/:id', updateListing);
 router.put('/listings/:id/verify', verifyListing);
 router.put('/listings/:id/status', setListingStatus);
+router.patch('/listings/:id/reassign-owner', reassignListingOwner);
 
 // ─── Users ────────────────────────────────────────────────────────────────────
 router.get('/users', getAllUsers);
@@ -82,5 +91,12 @@ router.get('/trust-safety/reports', getTrustSafetyReports);
 router.get('/reviews', getAllReviews);
 router.put('/reviews/:id/status', updateAdminReviewStatus);
 router.delete('/reviews/:id', deleteAdminReview);
+
+// ─── Audit Logs ───────────────────────────────────────────────────────────────
+router.get('/audit-logs', getAuditLogs);
+
+// ─── System Settings ──────────────────────────────────────────────────────────
+router.get('/system/settings', getSystemSettings);
+router.put('/system/settings', updateSystemSetting);
 
 module.exports = router;
