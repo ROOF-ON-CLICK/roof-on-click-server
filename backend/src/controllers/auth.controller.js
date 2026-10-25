@@ -309,6 +309,7 @@ const logoutAll = async (req, res, next) => {
     await redis.setex(`user_revoked:${userId}`, REFRESH_TTL_SECONDS, now.toString());
 
     // Delete all RT sessions for this user via SCAN (no wildcard DEL in Redis)
+    const prefix = redis.options?.keyPrefix || '';
     let cursor = '0';
     do {
       const [nextCursor, keys] = await redis.scan(
@@ -316,7 +317,8 @@ const logoutAll = async (req, res, next) => {
       );
       cursor = nextCursor;
       if (keys.length > 0) {
-        await redis.del(...keys);
+        const strippedKeys = prefix ? keys.map((k) => k.startsWith(prefix) ? k.slice(prefix.length) : k) : keys;
+        await redis.del(...strippedKeys);
       }
     } while (cursor !== '0');
 
@@ -510,7 +512,9 @@ const resetPassword = async (req, res, next) => {
       const pattern = `refresh:${user._id.toString()}:*`;
       const keys = await redis.keys(pattern);
       if (keys.length > 0) {
-        await redis.del(...keys);
+        const prefix = redis.options?.keyPrefix || '';
+        const strippedKeys = prefix ? keys.map((k) => k.startsWith(prefix) ? k.slice(prefix.length) : k) : keys;
+        await redis.del(...strippedKeys);
       }
     } catch (redisErr) {
       // Non-fatal — password is already changed

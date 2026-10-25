@@ -2,12 +2,19 @@ const mongoose = require('mongoose');
 const Review = require('../models/Review.model');
 const Listing = require('../models/Listing.model');
 const { success, error } = require('../utils/apiResponse');
+const { getOrSetCache, deleteCacheKeys } = require('../utils/cache');
 
 // ─── GET /api/reviews/property/:propertyId ───────────────────────────────────
 const getPropertyReviews = async (req, res, next) => {
   try {
     const { propertyId } = req.params;
-    const reviews = await Review.find({ property: propertyId }).sort({ createdAt: -1 }).lean();
+    const cacheKey = `reviews:list:${propertyId}`;
+
+    const reviews = await getOrSetCache(cacheKey, 600, async () => {
+      return await Review.find({ property: propertyId, status: { $ne: 'deleted' } })
+        .sort({ createdAt: -1 })
+        .lean();
+    });
 
     return success(res, { message: 'Reviews fetched.', data: { reviews } });
   } catch (err) {
@@ -53,6 +60,9 @@ const createReview = async (req, res, next) => {
       images: uploadedImages,
     });
 
+    // Zero-stale cache invalidation for both list and rating summary
+    await deleteCacheKeys([`reviews:list:${listing._id}`, `reviews:summary:${listing._id}`]);
+
     return success(res, { message: 'Review posted successfully.', data: { review }, statusCode: 201 });
   } catch (err) {
     next(err);
@@ -80,6 +90,9 @@ const toggleHelpful = async (req, res, next) => {
     }
 
     await review.save();
+
+    // Invalidate review list cache for this property
+    await deleteCacheKeys(`reviews:list:${review.property}`);
 
     return success(res, {
       message: isClicked ? 'Marked as helpful.' : 'Helpful vote removed.',
@@ -115,6 +128,9 @@ const addOwnerReply = async (req, res, next) => {
 
     await review.save();
 
+    // Invalidate review list cache for this property
+    await deleteCacheKeys(`reviews:list:${review.property._id || review.property}`);
+
     return success(res, { message: 'Reply posted successfully.', data: { review } });
   } catch (err) {
     next(err);
@@ -129,57 +145,63 @@ const getRatingSummary = async (req, res, next) => {
       return error(res, { message: 'Invalid property ID.', statusCode: 400 });
     }
 
-    const [aggResult] = await Review.aggregate([
-      {
-        $match: {
-          property: new mongoose.Types.ObjectId(propertyId),
-          status: { $ne: 'deleted' },
+    const cacheKey = `reviews:summary:${propertyId}`;
+
+    const summaryData = await getOrSetCache(cacheKey, 1800, async () => {
+      const [aggResult] = await Review.aggregate([
+        {
+          $match: {
+            property: new mongoose.Types.ObjectId(propertyId),
+            status: { $ne: 'deleted' },
+          },
         },
-      },
-      {
-        $facet: {
-          stats: [
-            {
-              $group: {
-                _id: null,
-                total: { $sum: 1 },
-                avgRating: { $avg: '$rating' },
+        {
+          $facet: {
+            stats: [
+              {
+                $group: {
+                  _id: null,
+                  total: { $sum: 1 },
+                  avgRating: { $avg: '$rating' },
+                },
               },
-            },
-          ],
-          starDistribution: [
-            {
-              $group: {
-                _id: '$rating',
-                count: { $sum: 1 },
+            ],
+            starDistribution: [
+              {
+                $group: {
+                  _id: '$rating',
+                  count: { $sum: 1 },
+                },
               },
-            },
-          ],
+            ],
+          },
         },
-      },
-    ]);
+      ]);
 
-    const stats = aggResult?.stats?.[0];
-    const total = stats?.total || 0;
-    const avg = total > 0 ? stats.avgRating : 5.0;
+      const stats = aggResult?.stats?.[0];
+      const total = stats?.total || 0;
+      const avg = total > 0 ? stats.avgRating : 5.0;
 
-    const starDistribution = { 5: 0, 4: 0, 3: 0, 2: 0, 1: 0 };
-    if (aggResult?.starDistribution) {
-      aggResult.starDistribution.forEach((item) => {
-        const star = Math.round(item._id);
-        if (star >= 1 && star <= 5) {
-          starDistribution[star] = item.count;
-        }
-      });
-    }
+      const starDistribution = { 5: 0, 4: 0, 3: 0, 2: 0, 1: 0 };
+      if (aggResult?.starDistribution) {
+        aggResult.starDistribution.forEach((item) => {
+          const star = Math.round(item._id);
+          if (star >= 1 && star <= 5) {
+            starDistribution[star] = item.count;
+          }
+        });
+      }
 
-    return success(res, {
-      message: 'Rating summary fetched.',
-      data: {
+      return {
         overallRating: Number(avg.toFixed(1)),
         totalVerifiedReviews: total,
         starDistribution,
-      },
+      };
+    });
+
+    return success(res, {
+      message: 'Rating summary fetched.',
+      data: summaryData,
     });
   } catch (err) {
     next(err);

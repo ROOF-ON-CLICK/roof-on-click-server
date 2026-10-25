@@ -4,6 +4,12 @@ const ListingDraft = require('../models/ListingDraft.model');
 const User = require('../models/User.model');
 const { createNotification, createBulkNotifications } = require('../services/notification.service');
 const { success, error } = require('../utils/apiResponse');
+const {
+  getOrSetCache,
+  getListingsVersion,
+  hashQuery,
+  invalidateListingCache,
+} = require('../utils/cache');
 
 // Helper to sanitize sensitive address information before returning to public client
 const sanitizeListingAddress = (listingDoc, currentUser) => {
@@ -122,21 +128,30 @@ const getListings = async (req, res, next) => {
     const limitNum = isAll ? 1000 : Math.min(1000, Math.max(1, Number(limit)));
     const skip = isAll ? 0 : (pageNum - 1) * limitNum;
 
-    let query = Listing.find(filter)
-      .sort(sortObj)
-      .populate('owner', 'name avatar phone')
-      .lean();
+    // Zero-stale search caching using listings:version partitioning
+    const listingsVersion = await getListingsVersion();
+    const queryHash = hashQuery(req.query);
+    const searchCacheKey = `listings:search:v${listingsVersion}:${queryHash}`;
 
-    if (!isAll) {
-      query = query.skip(skip).limit(limitNum);
-    } else {
-      query = query.limit(limitNum);
-    }
+    const { rawListings, total } = await getOrSetCache(searchCacheKey, 300, async () => {
+      let query = Listing.find(filter)
+        .sort(sortObj)
+        .populate('owner', 'name avatar phone')
+        .lean();
 
-    const [rawListings, total] = await Promise.all([
-      query,
-      Listing.countDocuments(filter),
-    ]);
+      if (!isAll) {
+        query = query.skip(skip).limit(limitNum);
+      } else {
+        query = query.limit(limitNum);
+      }
+
+      const [resListings, resTotal] = await Promise.all([
+        query,
+        Listing.countDocuments(filter),
+      ]);
+
+      return { rawListings: resListings, total: resTotal };
+    });
 
     const listings = (rawListings || []).map((l) => sanitizeListingAddress(l, req.user));
 
@@ -176,21 +191,27 @@ const getListings = async (req, res, next) => {
 // ─── GET /api/listings/:id ────────────────────────────────────────────────────
 /**
  * Single listing detail.
+ * Cached in Redis with zero-stale invalidation on edit/approval/booking.
  * Side effects: increments viewCount, pushes to recentlyViewed if authenticated.
  */
 const getListing = async (req, res, next) => {
   try {
-    const listing = await Listing.findOne({ _id: req.params.id, status: { $ne: 'deleted' } })
-      .populate('owner', 'name avatar phone email')
-      .populate('verifiedBy', 'name');
+    const listingId = req.params.id;
+    const detailCacheKey = `listing:detail:${listingId}`;
+
+    const listing = await getOrSetCache(detailCacheKey, 900, async () => {
+      return await Listing.findOne({ _id: listingId, status: { $ne: 'deleted' } })
+        .populate('owner', 'name avatar phone email')
+        .populate('verifiedBy', 'name')
+        .lean();
+    });
 
     if (!listing) {
       return error(res, { message: 'Listing not found.', statusCode: 404 });
     }
 
-    // Increment view count
-    listing.viewCount += 1;
-    await listing.save({ validateBeforeSave: false });
+    // Increment view count asynchronously in MongoDB
+    Listing.updateOne({ _id: listingId }, { $inc: { viewCount: 1 } }).catch(() => {});
 
     // Push to recently viewed (max 20, FIFO) if authenticated
     if (req.user) {
@@ -267,6 +288,9 @@ const createListing = async (req, res, next) => {
         validityMonths: 6,
       },
     });
+
+    // Zero-stale cache invalidation
+    await invalidateListingCache(listing._id);
 
     if (!isDraft) {
       // ── 1. Notify Owner of Successful Submission ──
@@ -392,6 +416,9 @@ const updateListing = async (req, res, next) => {
       return error(res, { message: 'Listing not found.', statusCode: 404 });
     }
 
+    // Zero-stale cache invalidation before returning response
+    await invalidateListingCache(listing._id);
+
     if (isPublishing) {
       createNotification({
         recipient: req.user._id,
@@ -479,6 +506,9 @@ const deleteListing = async (req, res, next) => {
     listing.status = 'deleted';
     await listing.save();
 
+    // Zero-stale cache invalidation
+    await invalidateListingCache(listing._id);
+
     return success(res, { message: 'Listing deleted successfully.' });
   } catch (err) {
     next(err);
@@ -515,8 +545,8 @@ const getWhatsAppLink = async (req, res, next) => {
 
 // ─── POST /api/listings/:id/photos ───────────────────────────────────────────
 /**
- * Upload photos to R2 — handled after upload middleware runs.
- * Middleware attaches req.uploadedPhotos = [{url, key}]
+ * Append photos to existing listing.
+ * Handled via uploadToR2 middleware — req.uploadedPhotos contains array of { url, key }.
  */
 const uploadPhotos = async (req, res, next) => {
   try {
@@ -535,6 +565,9 @@ const uploadPhotos = async (req, res, next) => {
 
     listing.photos.push(...req.uploadedPhotos);
     await listing.save();
+
+    // Zero-stale cache invalidation
+    await invalidateListingCache(listing._id);
 
     return success(res, {
       message: `${req.uploadedPhotos.length} photo(s) uploaded successfully.`,
@@ -580,15 +613,19 @@ const deletePhoto = async (req, res, next) => {
     listing.photos = listing.photos.filter((p) => p.key !== decodedPhotoKey);
     await listing.save();
 
+    // Zero-stale cache invalidation
+    await invalidateListingCache(listing._id);
+
     return success(res, { message: 'Photo deleted successfully.', data: { photos: listing.photos } });
   } catch (err) {
     next(err);
   }
 };
 
-// ─── GET /api/listings/cities ──────────────────────────────────────────────────
+// ─── GET /api/listings/cities ─────────────────────────────────────────────────
 /**
  * Return supported and active cities with listing counts.
+ * Cached in Redis with zero-stale invalidation when any listing changes.
  */
 const getAvailableCities = async (req, res, next) => {
   try {
@@ -601,28 +638,30 @@ const getAvailableCities = async (req, res, next) => {
       { id: 'bangalore', name: 'Bangalore', state: 'Karnataka', isLive: false },
     ];
 
-    const cityCounts = await Listing.aggregate([
-      { $match: { status: 'active', 'address.city': { $exists: true, $ne: '' } } },
-      {
-        $group: {
-          _id: { $toLower: { $trim: { input: '$address.city' } } },
-          count: { $sum: 1 },
+    const citiesWithCounts = await getOrSetCache('cities:registry', 86400, async () => {
+      const cityCounts = await Listing.aggregate([
+        { $match: { status: 'active', 'address.city': { $exists: true, $ne: '' } } },
+        {
+          $group: {
+            _id: { $toLower: { $trim: { input: '$address.city' } } },
+            count: { $sum: 1 },
+          },
         },
-      },
-    ]);
+      ]);
 
-    const countMap = new Map();
-    cityCounts.forEach((item) => {
-      if (item._id) countMap.set(item._id, item.count);
-    });
+      const countMap = new Map();
+      cityCounts.forEach((item) => {
+        if (item._id) countMap.set(item._id, item.count);
+      });
 
-    const citiesWithCounts = registry.map((c) => {
-      const count = countMap.get(c.name.toLowerCase()) || 0;
-      return {
-        ...c,
-        isLive: c.isLive || count > 0,
-        listingCount: count,
-      };
+      return registry.map((c) => {
+        const count = countMap.get(c.name.toLowerCase()) || 0;
+        return {
+          ...c,
+          isLive: c.isLive || count > 0,
+          listingCount: count,
+        };
+      });
     });
 
     return success(res, { message: 'Cities fetched.', data: { cities: citiesWithCounts } });

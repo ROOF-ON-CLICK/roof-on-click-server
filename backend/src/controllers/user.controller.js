@@ -1,11 +1,18 @@
 const User = require('../models/User.model');
 const Listing = require('../models/Listing.model');
 const { success, error } = require('../utils/apiResponse');
+const { getOrSetCache, deleteCacheKeys } = require('../utils/cache');
 
 // ─── GET /api/users/profile ───────────────────────────────────────────────────
 const getProfile = async (req, res, next) => {
   try {
-    const user = await User.findById(req.user._id).select('-password');
+    const userId = req.user._id.toString();
+    const cacheKey = `user:profile:${userId}`;
+
+    const user = await getOrSetCache(cacheKey, 600, async () => {
+      return await User.findById(userId).select('-password').lean();
+    });
+
     return success(res, { message: 'Profile fetched.', data: { user } });
   } catch (err) {
     next(err);
@@ -46,6 +53,9 @@ const updateProfile = async (req, res, next) => {
       { $set: updates },
       { new: true, runValidators: true }
     ).select('-password');
+
+    // Zero-stale cache invalidation
+    await deleteCacheKeys(`user:profile:${req.user._id}`);
 
     return success(res, { message: 'Profile updated.', data: { user } });
   } catch (err) {

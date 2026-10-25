@@ -7,6 +7,7 @@ const User = require('../models/User.model');
 const Booking = require('../models/Booking.model');
 const { createNotification } = require('../services/notification.service');
 const { success, error } = require('../utils/apiResponse');
+const { invalidateListingCache } = require('../utils/cache');
 
 // Helper to execute operations in a transaction with standalone replica fallback
 const runPaymentTransaction = async (workFn) => {
@@ -51,7 +52,7 @@ const finalizeBookingPayment = async ({
   amount,
   notes = {},
 }) => {
-  return await runPaymentTransaction(async (session) => {
+  const result = await runPaymentTransaction(async (session) => {
     const opts = session ? { session } : {};
 
     // 1. Update Payment record idempotently
@@ -115,6 +116,14 @@ const finalizeBookingPayment = async ({
 
     return { payment, booking, roomAllocated };
   });
+
+  // Zero-stale cache invalidation if room inventory changed
+  const targetListingId = listingId;
+  if (targetListingId) {
+    await invalidateListingCache(targetListingId);
+  }
+
+  return result;
 };
 
 /**

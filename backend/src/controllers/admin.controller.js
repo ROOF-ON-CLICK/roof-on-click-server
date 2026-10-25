@@ -10,6 +10,7 @@ const SystemSetting = require('../models/SystemSetting.model');
 const RoomInventory = require('../models/RoomInventory.model');
 const { createNotification } = require('../services/notification.service');
 const { success, error } = require('../utils/apiResponse');
+const { invalidateListingCache, getOrSetCache } = require('../utils/cache');
 
 // Helper to record audit log
 const logAdminAction = async ({ actor, action, targetType, targetId, details = {}, req, session = null }) => {
@@ -39,122 +40,123 @@ const logAdminAction = async ({ actor, action, targetType, targetId, details = {
 // ─── GET /api/admin/stats ─────────────────────────────────────────────────────
 /**
   * Summary KPIs and dashboard counters for Admin Overview.
-  * Optimized using single MongoDB aggregation pipelines for fast calculation.
+  * Cached in Redis with 60s TTL to prevent heavy multi-facet re-execution.
   */
 const getDashboardStats = async (req, res, next) => {
   try {
-    const [listingStats, userStats, bookingStats, paymentStats, reviewStats, recentProperties] = await Promise.all([
-      // Listing counts in a single aggregation pass
-      Listing.aggregate([
-        {
-          $facet: {
-            total: [{ $count: 'count' }],
-            pending: [{ $match: { status: 'pending' } }, { $count: 'count' }],
-            active: [{ $match: { status: 'active' } }, { $count: 'count' }],
-            rejected: [{ $match: { status: 'rejected' } }, { $count: 'count' }],
-            draft: [{ $match: { status: 'draft' } }, { $count: 'count' }],
-            verified: [{ $match: { isVerified: true } }, { $count: 'count' }],
-            featured: [{ $match: { isFeatured: true } }, { $count: 'count' }],
+    const statsData = await getOrSetCache('admin:dashboard:stats', 60, async () => {
+      const [listingStats, userStats, bookingStats, paymentStats, reviewStats, recentProperties] = await Promise.all([
+        // Listing counts in a single aggregation pass
+        Listing.aggregate([
+          {
+            $facet: {
+              total: [{ $count: 'count' }],
+              pending: [{ $match: { status: 'pending' } }, { $count: 'count' }],
+              active: [{ $match: { status: 'active' } }, { $count: 'count' }],
+              rejected: [{ $match: { status: 'rejected' } }, { $count: 'count' }],
+              draft: [{ $match: { status: 'draft' } }, { $count: 'count' }],
+              verified: [{ $match: { isVerified: true } }, { $count: 'count' }],
+              featured: [{ $match: { isFeatured: true } }, { $count: 'count' }],
+            },
           },
-        },
-      ]),
-      // User counts in a single aggregation pass
-      User.aggregate([
-        {
-          $facet: {
-            total: [{ $count: 'count' }],
-            owners: [{ $match: { role: 'owner' } }, { $count: 'count' }],
-            seekers: [{ $match: { role: 'seeker' } }, { $count: 'count' }],
-            admins: [{ $match: { role: 'admin' } }, { $count: 'count' }],
-            verified: [{ $match: { isVerified: true } }, { $count: 'count' }],
+        ]),
+        // User counts in a single aggregation pass
+        User.aggregate([
+          {
+            $facet: {
+              total: [{ $count: 'count' }],
+              owners: [{ $match: { role: 'owner' } }, { $count: 'count' }],
+              seekers: [{ $match: { role: 'seeker' } }, { $count: 'count' }],
+              admins: [{ $match: { role: 'admin' } }, { $count: 'count' }],
+              verified: [{ $match: { isVerified: true } }, { $count: 'count' }],
+            },
           },
-        },
-      ]),
-      // Booking counts
-      Booking.aggregate([
-        {
-          $facet: {
-            total: [{ $count: 'count' }],
-            pending: [{ $match: { status: 'pending' } }, { $count: 'count' }],
-            confirmed: [{ $match: { status: 'confirmed' } }, { $count: 'count' }],
-            cancelled: [{ $match: { status: 'cancelled' } }, { $count: 'count' }],
+        ]),
+        // Booking counts
+        Booking.aggregate([
+          {
+            $facet: {
+              total: [{ $count: 'count' }],
+              pending: [{ $match: { status: 'pending' } }, { $count: 'count' }],
+              confirmed: [{ $match: { status: 'confirmed' } }, { $count: 'count' }],
+              cancelled: [{ $match: { status: 'cancelled' } }, { $count: 'count' }],
+            },
           },
-        },
-      ]),
-      // Payment aggregates (total volume, monthly volume)
-      Payment.aggregate([
-        {
-          $facet: {
-            totalVolume: [
-              { $match: { status: 'paid' } },
-              { $group: { _id: null, total: { $sum: '$amount' } } },
-            ],
-            thisMonth: [
-              {
-                $match: {
-                  status: 'paid',
-                  createdAt: { $gte: new Date(new Date().getFullYear(), new Date().getMonth(), 1) },
+        ]),
+        // Payment aggregates (total volume, monthly volume)
+        Payment.aggregate([
+          {
+            $facet: {
+              totalVolume: [
+                { $match: { status: 'paid' } },
+                { $group: { _id: null, total: { $sum: '$amount' } } },
+              ],
+              thisMonth: [
+                {
+                  $match: {
+                    status: 'paid',
+                    createdAt: { $gte: new Date(new Date().getFullYear(), new Date().getMonth(), 1) },
+                  },
                 },
-              },
-              { $group: { _id: null, total: { $sum: '$amount' } } },
-            ],
+                { $group: { _id: null, total: { $sum: '$amount' } } },
+              ],
+            },
           },
-        },
-      ]),
-      // Review count & avg rating
-      Review.aggregate([
-        {
-          $group: {
-            _id: null,
-            totalReviews: { $sum: 1 },
-            avgRating: { $avg: '$rating' },
+        ]),
+        // Review count & avg rating
+        Review.aggregate([
+          {
+            $group: {
+              _id: null,
+              totalReviews: { $sum: 1 },
+              avgRating: { $avg: '$rating' },
+            },
           },
-        },
-      ]),
-      // 5 most recent listings with light projection
-      Listing.find()
-        .sort({ createdAt: -1 })
-        .limit(5)
-        .select('title address type gender rent status isVerified isFeatured photos createdAt')
-        .populate('owner', 'name email phone')
-        .lean(),
-    ]);
+        ]),
+        // 5 most recent listings with light projection
+        Listing.find()
+          .sort({ createdAt: -1 })
+          .limit(5)
+          .select('title address type gender rent status isVerified isFeatured photos createdAt')
+          .populate('owner', 'name email phone')
+          .lean(),
+      ]);
 
-    const lFacet = listingStats[0] || {};
-    const uFacet = userStats[0] || {};
-    const bFacet = bookingStats[0] || {};
-    const pFacet = paymentStats[0] || {};
-    const rData = reviewStats[0] || { totalReviews: 0, avgRating: 4.8 };
+      const lFacet = listingStats[0] || {};
+      const uFacet = userStats[0] || {};
+      const bFacet = bookingStats[0] || {};
+      const pFacet = paymentStats[0] || {};
+      const rData = reviewStats[0] || { totalReviews: 0, avgRating: 4.8 };
 
-    const kpis = {
-      totalProperties: lFacet.total?.[0]?.count || 0,
-      pendingProperties: lFacet.pending?.[0]?.count || 0,
-      activeProperties: lFacet.active?.[0]?.count || 0,
-      rejectedProperties: lFacet.rejected?.[0]?.count || 0,
-      draftProperties: lFacet.draft?.[0]?.count || 0,
-      verifiedProperties: lFacet.verified?.[0]?.count || 0,
-      featuredProperties: lFacet.featured?.[0]?.count || 0,
-      totalUsers: uFacet.total?.[0]?.count || 0,
-      totalOwners: uFacet.owners?.[0]?.count || 0,
-      totalSeekers: uFacet.seekers?.[0]?.count || 0,
-      totalAdmins: uFacet.admins?.[0]?.count || 0,
-      verifiedOwners: uFacet.verified?.[0]?.count || 0,
-      totalBookings: bFacet.total?.[0]?.count || 0,
-      pendingBookings: bFacet.pending?.[0]?.count || 0,
-      confirmedBookings: bFacet.confirmed?.[0]?.count || 0,
-      cancelledBookings: bFacet.cancelled?.[0]?.count || 0,
-      totalRevenue: pFacet.totalVolume?.[0]?.total || 0,
-      monthlyRevenue: pFacet.thisMonth?.[0]?.total || 0,
-      totalReviews: rData.totalReviews || 0,
-      avgRating: Number((rData.avgRating || 4.8).toFixed(1)),
-    };
+      const kpis = {
+        totalProperties: lFacet.total?.[0]?.count || 0,
+        pendingProperties: lFacet.pending?.[0]?.count || 0,
+        activeProperties: lFacet.active?.[0]?.count || 0,
+        rejectedProperties: lFacet.rejected?.[0]?.count || 0,
+        draftProperties: lFacet.draft?.[0]?.count || 0,
+        verifiedProperties: lFacet.verified?.[0]?.count || 0,
+        featuredProperties: lFacet.featured?.[0]?.count || 0,
+        totalUsers: uFacet.total?.[0]?.count || 0,
+        totalOwners: uFacet.owners?.[0]?.count || 0,
+        totalSeekers: uFacet.seekers?.[0]?.count || 0,
+        totalAdmins: uFacet.admins?.[0]?.count || 0,
+        verifiedOwners: uFacet.verified?.[0]?.count || 0,
+        totalBookings: bFacet.total?.[0]?.count || 0,
+        pendingBookings: bFacet.pending?.[0]?.count || 0,
+        confirmedBookings: bFacet.confirmed?.[0]?.count || 0,
+        cancelledBookings: bFacet.cancelled?.[0]?.count || 0,
+        totalRevenue: pFacet.totalVolume?.[0]?.total || 0,
+        monthlyRevenue: pFacet.thisMonth?.[0]?.total || 0,
+        totalReviews: rData.totalReviews || 0,
+        avgRating: Number((rData.avgRating || 4.8).toFixed(1)),
+      };
+
+      return { kpis, recentProperties };
+    });
 
     return success(res, {
       message: 'Admin stats fetched successfully.',
-      data: {
-        kpis,
-        recentProperties,
-      },
+      data: statsData,
     });
   } catch (err) {
     next(err);
@@ -468,6 +470,9 @@ const verifyListing = async (req, res, next) => {
     await session.commitTransaction();
     session.endSession();
 
+    // Zero-stale cache invalidation
+    await invalidateListingCache(listing._id);
+
     if (isNowVerified) {
       createNotification({
         recipient: listing.owner,
@@ -540,6 +545,9 @@ const setListingStatus = async (req, res, next) => {
 
     await session.commitTransaction();
     session.endSession();
+
+    // Zero-stale cache invalidation
+    await invalidateListingCache(listing._id);
 
     // Notify owner
     if (listing.owner) {
