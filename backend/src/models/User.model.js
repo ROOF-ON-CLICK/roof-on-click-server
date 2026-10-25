@@ -174,5 +174,7 @@ const userSchema = new mongoose.Schema(
 // Removed duplicate index because email has unique: true
 userSchema.index({ googleId: 1 });
 userSchema.index({ phone: 1 }, { sparse: true });
+userSchema.index({ role: 1, status: 1 });
+userSchema.index({ role: 1, createdAt: -1 });
 
 module.exports = mongoose.model('User', userSchema);

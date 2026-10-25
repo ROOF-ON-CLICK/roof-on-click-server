@@ -1,11 +1,18 @@
 const User = require('../models/User.model');
 const Listing = require('../models/Listing.model');
 const { success, error } = require('../utils/apiResponse');
+const { getOrSetCache, deleteCacheKeys } = require('../utils/cache');
 
 // ─── GET /api/users/profile ───────────────────────────────────────────────────
 const getProfile = async (req, res, next) => {
   try {
-    const user = await User.findById(req.user._id).select('-password');
+    const userId = req.user._id.toString();
+    const cacheKey = `user:profile:${userId}`;
+
+    const user = await getOrSetCache(cacheKey, 600, async () => {
+      return await User.findById(userId).select('-password').lean();
+    });
+
     return success(res, { message: 'Profile fetched.', data: { user } });
   } catch (err) {
     next(err);
@@ -47,6 +54,9 @@ const updateProfile = async (req, res, next) => {
       { new: true, runValidators: true }
     ).select('-password');
 
+    // Zero-stale cache invalidation
+    await deleteCacheKeys(`user:profile:${req.user._id}`);
+
     return success(res, { message: 'Profile updated.', data: { user } });
   } catch (err) {
     next(err);
@@ -76,23 +86,22 @@ const getSavedListings = async (req, res, next) => {
 // ─── POST /api/users/saved/:listingId ────────────────────────────────────────
 const saveListing = async (req, res, next) => {
   try {
-    const listing = await Listing.findOne({ _id: req.params.listingId, status: { $ne: 'deleted' } });
-    if (!listing) {
+    const listingId = req.params.listingId;
+    const listingExists = await Listing.exists({ _id: listingId, status: { $ne: 'deleted' } });
+    if (!listingExists) {
       return error(res, { message: 'Listing not found.', statusCode: 404 });
     }
 
-    const user = await User.findById(req.user._id);
-    if (!user.savedListings) user.savedListings = [];
-    const alreadySaved = user.savedListings.some(
-      (id) => id && id.toString() === req.params.listingId.toString()
+    const updatedUser = await User.findByIdAndUpdate(
+      req.user._id,
+      { $addToSet: { savedListings: listingId } },
+      { new: true, select: 'savedListings' }
     );
 
-    if (!alreadySaved) {
-      user.savedListings.push(req.params.listingId);
-      await user.save();
-    }
-
-    return success(res, { message: 'Listing saved.', data: { savedListings: user.savedListings } });
+    return success(res, {
+      message: 'Listing saved.',
+      data: { savedListings: updatedUser?.savedListings || [] },
+    });
   } catch (err) {
     next(err);
   }
@@ -101,16 +110,17 @@ const saveListing = async (req, res, next) => {
 // ─── DELETE /api/users/saved/:listingId ──────────────────────────────────────
 const unsaveListing = async (req, res, next) => {
   try {
-    const listingId = (req.params.listingId || '').toString();
-    const user = await User.findById(req.user._id);
-    if (user && user.savedListings) {
-      user.savedListings = user.savedListings.filter(
-        (id) => id && id.toString() !== listingId
-      );
-      await user.save();
-    }
+    const listingId = req.params.listingId;
+    const updatedUser = await User.findByIdAndUpdate(
+      req.user._id,
+      { $pull: { savedListings: listingId } },
+      { new: true, select: 'savedListings' }
+    );
 
-    return success(res, { message: 'Listing removed from saved.' });
+    return success(res, {
+      message: 'Listing removed from saved.',
+      data: { savedListings: updatedUser?.savedListings || [] },
+    });
   } catch (err) {
     next(err);
   }

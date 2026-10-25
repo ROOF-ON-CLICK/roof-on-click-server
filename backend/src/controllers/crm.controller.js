@@ -440,7 +440,7 @@ const bulkAddOrUpdateRooms = async (req, res) => {
     const existingRooms = await RoomInventory.find({ propertyId, roomNumber: { $in: roomNumbers } });
     const existingMap = new Map(existingRooms.map((r) => [r.roomNumber, r]));
 
-    const savedRooms = [];
+    const bulkOps = [];
 
     for (const r of uniqueRooms) {
       const roomNumber = String(r.roomNumber).trim();
@@ -463,25 +463,20 @@ const bulkAddOrUpdateRooms = async (req, res) => {
       const existingRoom = existingMap.get(roomNumber);
 
       if (existingRoom) {
-        existingRoom.floorNumber = parsedFloor;
-        existingRoom.roomType = cleanRoomType;
-        existingRoom.baseMonthlyRent = Number(r.baseMonthlyRent) || 0;
-        existingRoom.attachedBathroom = r.attachedBathroom !== undefined ? Boolean(r.attachedBathroom) : true;
-
         const currentBeds = existingRoom.beds || [];
         const occupiedCount = currentBeds.filter((b) => b.status === 'Occupied' || b.status === 'Notice').length;
         const targetBeds = Math.max(numBeds, occupiedCount);
 
+        let finalBeds = [...currentBeds];
         if (targetBeds > currentBeds.length) {
           for (let i = currentBeds.length; i < targetBeds; i++) {
-            currentBeds.push({
+            finalBeds.push({
               label: `Bed ${i + 1}`,
               status: 'Vacant',
               occupiedBy: null,
               tenantName: '',
             });
           }
-          existingRoom.beds = currentBeds;
         } else if (targetBeds < currentBeds.length) {
           const kept = [];
           let toRemove = currentBeds.length - targetBeds;
@@ -492,11 +487,24 @@ const bulkAddOrUpdateRooms = async (req, res) => {
               kept.unshift(currentBeds[i]);
             }
           }
-          existingRoom.beds = kept;
+          finalBeds = kept;
         }
-        existingRoom.totalBeds = targetBeds;
-        const saved = await existingRoom.save();
-        savedRooms.push(saved);
+
+        bulkOps.push({
+          updateOne: {
+            filter: { _id: existingRoom._id },
+            update: {
+              $set: {
+                floorNumber: parsedFloor,
+                roomType: cleanRoomType,
+                baseMonthlyRent: Number(r.baseMonthlyRent) || 0,
+                attachedBathroom: r.attachedBathroom !== undefined ? Boolean(r.attachedBathroom) : true,
+                totalBeds: targetBeds,
+                beds: finalBeds,
+              },
+            },
+          },
+        });
       } else {
         const beds = [];
         for (let i = 0; i < numBeds; i++) {
@@ -508,23 +516,33 @@ const bulkAddOrUpdateRooms = async (req, res) => {
           });
         }
 
-        const newRoom = await RoomInventory.create({
-          propertyId,
-          ownerId,
-          floorNumber: parsedFloor,
-          roomNumber,
-          roomType: cleanRoomType,
-          totalBeds: numBeds,
-          baseMonthlyRent: Number(r.baseMonthlyRent) || 0,
-          attachedBathroom: r.attachedBathroom !== undefined ? Boolean(r.attachedBathroom) : true,
-          beds,
+        bulkOps.push({
+          insertOne: {
+            document: {
+              propertyId,
+              ownerId,
+              floorNumber: parsedFloor,
+              roomNumber,
+              roomType: cleanRoomType,
+              totalBeds: numBeds,
+              baseMonthlyRent: Number(r.baseMonthlyRent) || 0,
+              attachedBathroom: r.attachedBathroom !== undefined ? Boolean(r.attachedBathroom) : true,
+              beds,
+            },
+          },
         });
-        savedRooms.push(newRoom);
       }
     }
 
-    // Recalculate listing inventory stats once
-    const allRooms = await RoomInventory.find({ propertyId }).lean();
+    if (bulkOps.length > 0) {
+      await RoomInventory.bulkWrite(bulkOps, { ordered: false });
+    }
+
+    // Retrieve updated inventory in a single query
+    const allRooms = await RoomInventory.find({ propertyId })
+      .sort({ floorNumber: 1, roomNumber: 1 })
+      .lean();
+
     let totalAvailableBeds = 0;
     allRooms.forEach((rm) => {
       const vacant = (rm.beds || []).filter((b) => b.status === 'Vacant').length;
@@ -537,10 +555,10 @@ const bulkAddOrUpdateRooms = async (req, res) => {
     });
 
     return success(res, {
-      message: `Successfully configured ${savedRooms.length} rooms`,
+      message: `Successfully configured ${bulkOps.length} rooms`,
       data: {
-        count: savedRooms.length,
-        rooms: savedRooms,
+        count: allRooms.length,
+        rooms: allRooms,
       },
       statusCode: 201,
     });

@@ -85,7 +85,7 @@ const reviewSchema = new mongoose.Schema(
   }
 );
 
-reviewSchema.index({ property: 1 });
-reviewSchema.index({ user: 1 });
+reviewSchema.index({ property: 1, status: 1, createdAt: -1 });
+reviewSchema.index({ user: 1, createdAt: -1 });
 
 module.exports = mongoose.model('Review', reviewSchema);
