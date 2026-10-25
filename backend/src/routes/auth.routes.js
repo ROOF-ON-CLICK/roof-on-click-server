@@ -15,6 +15,10 @@ const {
   verifyResetToken,
   resetPassword,
   changePassword,
+  sendPhoneOTP,
+  verifyPhoneOTP,
+  retryPhoneOTP,
+  linkPhone,
 } = require('../controllers/auth.controller');
 const { verifyToken } = require('../middleware/auth.middleware');
 
@@ -91,6 +95,12 @@ router.post(
   body('refreshToken').notEmpty().withMessage('refreshToken is required'),
   refresh
 );
+
+// ─── Phone OTP Authentication (MSG91) ─────────────────────────────────────────
+router.post('/phone/send-otp', authLimiter, sendPhoneOTP);
+router.post('/phone/verify-otp', authLimiter, verifyPhoneOTP);
+router.post('/phone/retry-otp', authLimiter, retryPhoneOTP);
+router.post('/phone/link-phone', verifyToken, authLimiter, linkPhone);
 
 // Google OAuth (guarded — returns 503 if not configured)
 router.get(
