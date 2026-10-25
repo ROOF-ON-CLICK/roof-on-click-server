@@ -1,12 +1,44 @@
+const mongoose = require('mongoose');
 const crypto = require('crypto');
 const { razorpayInstance, key_id, key_secret } = require('../config/razorpay');
 const Payment = require('../models/Payment.model');
 const Listing = require('../models/Listing.model');
 const User = require('../models/User.model');
+const Booking = require('../models/Booking.model');
 const { createNotification } = require('../services/notification.service');
 const { success, error } = require('../utils/apiResponse');
 
-const Booking = require('../models/Booking.model');
+// Helper to execute operations in a transaction with standalone replica fallback
+const runPaymentTransaction = async (workFn) => {
+  let session = null;
+  try {
+    session = await mongoose.startSession();
+    session.startTransaction();
+    const result = await workFn(session);
+    await session.commitTransaction();
+    return result;
+  } catch (err) {
+    if (session) {
+      try {
+        await session.abortTransaction();
+      } catch (_) {}
+    }
+    // Fallback if standalone MongoDB without replica set
+    if (
+      err.message &&
+      (err.message.includes('replica set') ||
+        err.message.includes('Transaction numbers are only allowed on a replica set') ||
+        err.message.includes('Transactions are not supported'))
+    ) {
+      return await workFn(null);
+    }
+    throw err;
+  } finally {
+    if (session) {
+      await session.endSession();
+    }
+  }
+};
 
 // Helper to finalize a booking after successful payment (shared by client verify & webhook)
 const finalizeBookingPayment = async ({
@@ -19,65 +51,70 @@ const finalizeBookingPayment = async ({
   amount,
   notes = {},
 }) => {
-  // 1. Update Payment record idempotently
-  const payment = await Payment.findOne({ orderId });
-  if (payment) {
-    if (payment.status !== 'paid') {
-      payment.status = 'paid';
-      payment.paymentId = paymentId;
-      payment.signature = signature || 'webhook_or_verified';
-      payment.paidAt = new Date();
-      await payment.save();
-    }
-  }
+  return await runPaymentTransaction(async (session) => {
+    const opts = session ? { session } : {};
 
-  // 2. Decrement available room / bed atomically if defined (Race Condition Protection)
-  const targetListingId = listingId || payment?.listing;
-  let roomAllocated = true;
-
-  if (targetListingId && roomType) {
-    const listingWithRooms = await Listing.findById(targetListingId);
-    if (listingWithRooms?.rooms?.length > 0) {
-      const updated = await Listing.findOneAndUpdate(
-        {
-          _id: targetListingId,
-          'rooms.roomType': roomType,
-          $or: [
-            { 'rooms.availableRooms': { $gt: 0 } },
-            { 'rooms.availableBeds': { $gt: 0 } },
-          ],
-        },
-        {
-          $inc: {
-            'rooms.$.availableRooms': -1,
-            'rooms.$.availableBeds': -1,
-          },
-        },
-        { new: true }
-      );
-      if (!updated) {
-        roomAllocated = false;
-        console.warn(`[Inventory] Room ${roomType} for listing ${targetListingId} was sold out before finalization.`);
+    // 1. Update Payment record idempotently
+    const payment = await Payment.findOne({ orderId }).session(session || null);
+    if (payment) {
+      if (payment.status !== 'paid') {
+        payment.status = 'paid';
+        payment.paymentId = paymentId;
+        payment.signature = signature || 'webhook_or_verified';
+        payment.paidAt = new Date();
+        await payment.save(opts);
       }
     }
-  }
 
-  // 3. Update existing booking if one already exists for this payment/order
-  let booking = await Booking.findOne({
-    $or: [{ paymentId }, { 'pricing.totalDueNow': amount, property: targetListingId, user: userId }],
-  });
+    // 2. Decrement available room / bed atomically if defined (Race Condition Protection)
+    const targetListingId = listingId || payment?.listing;
+    let roomAllocated = true;
 
-  if (booking) {
-    booking.paymentStatus = 'paid';
-    booking.paymentId = paymentId;
-    booking.status = roomAllocated ? 'confirmed' : 'pending';
-    if (payment && !booking.payment) {
-      booking.payment = payment._id;
+    if (targetListingId && roomType) {
+      const listingWithRooms = await Listing.findById(targetListingId).session(session || null);
+      if (listingWithRooms?.rooms?.length > 0) {
+        const updated = await Listing.findOneAndUpdate(
+          {
+            _id: targetListingId,
+            'rooms.roomType': roomType,
+            $or: [
+              { 'rooms.availableRooms': { $gt: 0 } },
+              { 'rooms.availableBeds': { $gt: 0 } },
+            ],
+          },
+          {
+            $inc: {
+              'rooms.$.availableRooms': -1,
+              'rooms.$.availableBeds': -1,
+            },
+          },
+          { new: true, ...opts }
+        );
+        if (!updated) {
+          roomAllocated = false;
+          console.warn(`[Inventory] Room ${roomType} for listing ${targetListingId} was sold out before finalization.`);
+        }
+      }
     }
-    await booking.save();
-  }
 
-  return { payment, booking, roomAllocated };
+    // 3. Update existing booking if one already exists for this payment/order
+    const bookingQuery = {
+      $or: [{ paymentId }, { 'pricing.totalDueNow': amount, property: targetListingId, user: userId }],
+    };
+    let booking = await Booking.findOne(bookingQuery).session(session || null);
+
+    if (booking) {
+      booking.paymentStatus = 'paid';
+      booking.paymentId = paymentId;
+      booking.status = roomAllocated ? 'confirmed' : 'pending';
+      if (payment && !booking.payment) {
+        booking.payment = payment._id;
+      }
+      await booking.save(opts);
+    }
+
+    return { payment, booking, roomAllocated };
+  });
 };
 
 /**

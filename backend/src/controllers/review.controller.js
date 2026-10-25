@@ -1,3 +1,4 @@
+const mongoose = require('mongoose');
 const Review = require('../models/Review.model');
 const Listing = require('../models/Listing.model');
 const { success, error } = require('../utils/apiResponse');
@@ -124,16 +125,60 @@ const addOwnerReply = async (req, res, next) => {
 const getRatingSummary = async (req, res, next) => {
   try {
     const { propertyId } = req.params;
-    const reviews = await Review.find({ property: propertyId }).lean();
-    const total = reviews.length;
-    const avg = total > 0 ? reviews.reduce((acc, r) => acc + r.rating, 0) / total : 4.8;
+    if (!mongoose.Types.ObjectId.isValid(propertyId)) {
+      return error(res, { message: 'Invalid property ID.', statusCode: 400 });
+    }
+
+    const [aggResult] = await Review.aggregate([
+      {
+        $match: {
+          property: new mongoose.Types.ObjectId(propertyId),
+          status: { $ne: 'deleted' },
+        },
+      },
+      {
+        $facet: {
+          stats: [
+            {
+              $group: {
+                _id: null,
+                total: { $sum: 1 },
+                avgRating: { $avg: '$rating' },
+              },
+            },
+          ],
+          starDistribution: [
+            {
+              $group: {
+                _id: '$rating',
+                count: { $sum: 1 },
+              },
+            },
+          ],
+        },
+      },
+    ]);
+
+    const stats = aggResult?.stats?.[0];
+    const total = stats?.total || 0;
+    const avg = total > 0 ? stats.avgRating : 5.0;
+
+    const starDistribution = { 5: 0, 4: 0, 3: 0, 2: 0, 1: 0 };
+    if (aggResult?.starDistribution) {
+      aggResult.starDistribution.forEach((item) => {
+        const star = Math.round(item._id);
+        if (star >= 1 && star <= 5) {
+          starDistribution[star] = item.count;
+        }
+      });
+    }
 
     return success(res, {
       message: 'Rating summary fetched.',
       data: {
         overallRating: Number(avg.toFixed(1)),
-        totalVerifiedReviews: total || 12,
-        starDistribution: { 5: 8, 4: 3, 3: 1, 2: 0, 1: 0 },
+        totalVerifiedReviews: total,
+        starDistribution,
       },
     });
   } catch (err) {

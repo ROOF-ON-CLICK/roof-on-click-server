@@ -601,19 +601,29 @@ const getAvailableCities = async (req, res, next) => {
       { id: 'bangalore', name: 'Bangalore', state: 'Karnataka', isLive: false },
     ];
 
-    const citiesWithCounts = await Promise.all(
-      registry.map(async (c) => {
-        const count = await Listing.countDocuments({
-          status: 'active',
-          'address.city': { $regex: new RegExp(`^${c.name}$`, 'i') },
-        });
-        return {
-          ...c,
-          isLive: c.isLive || count > 0,
-          listingCount: count,
-        };
-      })
-    );
+    const cityCounts = await Listing.aggregate([
+      { $match: { status: 'active', 'address.city': { $exists: true, $ne: '' } } },
+      {
+        $group: {
+          _id: { $toLower: { $trim: { input: '$address.city' } } },
+          count: { $sum: 1 },
+        },
+      },
+    ]);
+
+    const countMap = new Map();
+    cityCounts.forEach((item) => {
+      if (item._id) countMap.set(item._id, item.count);
+    });
+
+    const citiesWithCounts = registry.map((c) => {
+      const count = countMap.get(c.name.toLowerCase()) || 0;
+      return {
+        ...c,
+        isLive: c.isLive || count > 0,
+        listingCount: count,
+      };
+    });
 
     return success(res, { message: 'Cities fetched.', data: { cities: citiesWithCounts } });
   } catch (err) {
