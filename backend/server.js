@@ -19,7 +19,17 @@ const startServer = async () => {
     process.exit(1);
   }
 
-  // ── Step 3: HTTP Server ───────────────────────────────────────────────────
+  // ── Step 3: RabbitMQ & Consumers ───────────────────────────────────────────
+  try {
+    const { initRabbitMQ } = require('./src/config/rabbitmq');
+    const { startConsumers } = require('./src/workers');
+    initRabbitMQ();
+    startConsumers();
+  } catch (err) {
+    console.error('[RabbitMQ] Initialization error:', err.message);
+  }
+
+  // ── Step 4: HTTP Server ───────────────────────────────────────────────────
   const server = app.listen(PORT, () => {
     console.log(`[Server] RoofOnClick API running on port ${PORT} [${process.env.NODE_ENV}]`);
   });

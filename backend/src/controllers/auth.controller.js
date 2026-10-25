@@ -1,7 +1,8 @@
 const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
 const { randomUUID, createHash, randomBytes } = require('crypto');
-const { sendPasswordResetEmail, sendOAuthAccountEmail, sendWelcomeEmail } = require('../services/email.service');
+const queueService = require('../services/queue.service');
+const { ROUTING_KEYS } = require('../config/rabbitmq');
 const { createNotification } = require('../services/notification.service');
 const { validationResult } = require('express-validator');
 
@@ -119,24 +120,26 @@ const register = async (req, res, next) => {
       isTrialActive: isOwner,
     });
 
-    // ── Welcome Email & In-App Notification ──
-    (async () => {
-      try {
-        await sendWelcomeEmail(user.email, user.name, user.role);
-        await createNotification({
-          recipient: user._id,
-          category: 'System',
-          type: 'system.welcome',
-          title: 'Welcome to RoofOnClick! 🏠',
-          message: user.role === 'owner'
-            ? 'Welcome to the RoofOnClick partner network! You can now list verified student accommodations with zero brokerage.'
-            : 'Welcome to RoofOnClick! Start exploring verified student hostels, PGs, and apartments across Indore.',
-          actionUrl: user.role === 'owner' ? '/owner/properties' : '/properties',
-        });
-      } catch (welcomeErr) {
-        console.error('[auth.controller] Failed to dispatch welcome email/notification:', welcomeErr.message);
-      }
-    })();
+    // ── Welcome Email & In-App Notification (Dispatched via RabbitMQ) ──
+    await queueService.publishMessage(ROUTING_KEYS.AUTH_EMAIL, {
+      type: 'WELCOME_EMAIL',
+      payload: {
+        email: user.email,
+        name: user.name,
+        role: user.role,
+      },
+    });
+
+    createNotification({
+      recipient: user._id,
+      category: 'System',
+      type: 'system.welcome',
+      title: 'Welcome to RoofOnClick! 🏠',
+      message: user.role === 'owner'
+        ? 'Welcome to the RoofOnClick partner network! You can now list verified student accommodations with zero brokerage.'
+        : 'Welcome to RoofOnClick! Start exploring verified student hostels, PGs, and apartments across Indore.',
+      actionUrl: user.role === 'owner' ? '/owner/properties' : '/properties',
+    }).catch((err) => console.error('[auth.controller] Welcome notification error:', err.message));
 
     const { token: accessToken } = signAccessToken(user);
     const familyId = randomUUID();
@@ -400,11 +403,10 @@ const forgotPassword = async (req, res, next) => {
 
     // Google OAuth-only accounts have googleId and no password — send a helpful redirect email instead
     if (user.googleId && !user.password) {
-      try {
-        await sendOAuthAccountEmail(user.email, user.name);
-      } catch (emailErr) {
-        console.error('[forgotPassword] Failed to send OAuth hint email:', emailErr);
-      }
+      await queueService.publishMessage(ROUTING_KEYS.AUTH_EMAIL, {
+        type: 'OAUTH_ACCOUNT_EMAIL',
+        payload: { email: user.email, name: user.name },
+      });
       return success(res, { message: GENERIC_MSG });
     }
 
@@ -416,16 +418,10 @@ const forgotPassword = async (req, res, next) => {
     user.resetPasswordExpires = new Date(Date.now() + 15 * 60 * 1000); // 15 min
     await user.save();
 
-    try {
-      await sendPasswordResetEmail(user.email, user.name, rawToken);
-    } catch (emailErr) {
-      // Roll back token so user can retry
-      user.resetPasswordToken = null;
-      user.resetPasswordExpires = null;
-      await user.save();
-      console.error('[forgotPassword] Failed to send reset email:', emailErr);
-      return error(res, { message: 'Failed to send reset email. Please try again.', statusCode: 500 });
-    }
+    await queueService.publishMessage(ROUTING_KEYS.AUTH_EMAIL, {
+      type: 'PASSWORD_RESET',
+      payload: { email: user.email, name: user.name, rawToken },
+    });
 
     return success(res, { message: GENERIC_MSG });
   } catch (err) {
