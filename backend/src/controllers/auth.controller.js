@@ -8,6 +8,7 @@ const { validationResult } = require('express-validator');
 const User = require('../models/User.model');
 const redis = require('../config/redis');
 const { success, error } = require('../utils/apiResponse');
+const msg91Service = require('../services/msg91.service');
 
 // ─── Constants ────────────────────────────────────────────────────────────────
 // Parse "1h" → 3600, "7d" → 604800 for Redis TTL (seconds)
@@ -599,6 +600,201 @@ const changePassword = async (req, res, next) => {
   }
 };
 
+/**
+ * POST /api/auth/phone/send-otp
+ * Public — Send OTP to an Indian mobile number via MSG91
+ */
+const sendPhoneOTP = async (req, res, next) => {
+  try {
+    const { phone } = req.body;
+    const cleanPhone = String(phone || '').replace(/\D/g, '');
+
+    if (!cleanPhone || cleanPhone.length !== 10 || !/^[6-9]\d{9}$/.test(cleanPhone)) {
+      return error(res, {
+        message: 'Please enter a valid 10-digit Indian mobile number.',
+        statusCode: 422,
+      });
+    }
+
+    // Rate-limiting check in Redis (Max 3 OTP sends per phone in 5 minutes)
+    const rateLimitKey = `otp_rate:${cleanPhone}`;
+    const attempts = await redis.incr(rateLimitKey);
+    if (attempts === 1) {
+      await redis.expire(rateLimitKey, 300); // 5 minutes
+    }
+    if (attempts > 3) {
+      return error(res, {
+        message: 'Too many OTP requests. Please wait 5 minutes before trying again.',
+        statusCode: 429,
+      });
+    }
+
+    const result = await msg91Service.sendOTP(cleanPhone);
+    return success(res, {
+      message: result.message,
+      data: { phone: cleanPhone, simulated: result.simulated },
+    });
+  } catch (err) {
+    return error(res, {
+      message: err.message || 'Failed to send OTP.',
+      statusCode: 500,
+    });
+  }
+};
+
+/**
+ * POST /api/auth/phone/verify-otp
+ * Public — Verify OTP and login or auto-register user
+ */
+const verifyPhoneOTP = async (req, res, next) => {
+  try {
+    const { phone, otp, name, role = 'seeker' } = req.body;
+    const cleanPhone = String(phone || '').replace(/\D/g, '');
+
+    if (!cleanPhone || cleanPhone.length !== 10) {
+      return error(res, { message: 'Valid 10-digit phone number is required.', statusCode: 422 });
+    }
+    if (!otp) {
+      return error(res, { message: 'OTP is required.', statusCode: 422 });
+    }
+
+    // 1. Verify via MSG91
+    await msg91Service.verifyOTP(cleanPhone, otp);
+
+    // 2. Find or register user
+    let user = await User.findOne({ phone: cleanPhone });
+    let isNewUser = false;
+
+    if (!user) {
+      isNewUser = true;
+      const userRole = role === 'owner' ? 'owner' : 'seeker';
+      const isOwner = userRole === 'owner';
+      const trialEndsAt = isOwner ? new Date(Date.now() + 90 * 24 * 60 * 60 * 1000) : null;
+
+      user = await User.create({
+        name: name ? name.trim() : `User ${cleanPhone.slice(-4)}`,
+        phone: cleanPhone,
+        role: userRole,
+        isPhoneVerified: true,
+        trialEndsAt,
+        isTrialActive: isOwner,
+      });
+
+      // Send welcome notifications asynchronously
+      createNotification({
+        recipient: user._id,
+        category: 'System',
+        type: 'system.welcome',
+        title: 'Welcome to RoofOnClick! 🏠',
+        message: isOwner
+          ? 'Welcome to RoofOnClick Partner network!'
+          : 'Welcome to RoofOnClick! Explore verified student accommodations.',
+        actionUrl: isOwner ? '/owner/properties' : '/properties',
+      }).catch(() => {});
+    }
+
+    // 3. Issue Tokens
+    const { token: accessToken } = signAccessToken(user);
+    const familyId = randomUUID();
+    const refreshToken = signRefreshToken(user._id.toString(), familyId);
+    await storeRefreshToken(user._id.toString(), familyId, refreshToken);
+
+    const userObj = user.toObject();
+    delete userObj.password;
+
+    return success(res, {
+      message: isNewUser ? 'Account created successfully.' : 'Login successful.',
+      data: {
+        ...buildTokenResponse(accessToken, refreshToken, userObj),
+        isNewUser,
+      },
+    });
+  } catch (err) {
+    return error(res, {
+      message: err.message || 'OTP verification failed.',
+      statusCode: 400,
+    });
+  }
+};
+
+/**
+ * POST /api/auth/phone/retry-otp
+ * Public — Resend OTP via voice or whatsapp fallback
+ */
+const retryPhoneOTP = async (req, res, next) => {
+  try {
+    const { phone, retryType = 'voice' } = req.body;
+    const cleanPhone = String(phone || '').replace(/\D/g, '');
+
+    if (!cleanPhone || cleanPhone.length !== 10) {
+      return error(res, { message: 'Valid 10-digit phone number is required.', statusCode: 422 });
+    }
+
+    const result = await msg91Service.retryOTP(cleanPhone, retryType);
+    return success(res, {
+      message: result.message,
+      data: { phone: cleanPhone },
+    });
+  } catch (err) {
+    return error(res, {
+      message: err.message || 'Failed to retry OTP.',
+      statusCode: 500,
+    });
+  }
+};
+
+/**
+ * POST /api/auth/phone/link-phone
+ * Authenticated — Link and verify phone number (e.g. for Google OAuth users)
+ */
+const linkPhone = async (req, res, next) => {
+  try {
+    const { phone, otp } = req.body;
+    const cleanPhone = String(phone || '').replace(/\D/g, '');
+
+    if (!cleanPhone || cleanPhone.length !== 10) {
+      return error(res, { message: 'Valid 10-digit phone number is required.', statusCode: 422 });
+    }
+    if (!otp) {
+      return error(res, { message: 'OTP is required.', statusCode: 422 });
+    }
+
+    // Check if another user already has this phone
+    const existing = await User.findOne({ phone: cleanPhone, _id: { $ne: req.user._id } });
+    if (existing) {
+      return error(res, {
+        message: 'This mobile number is already linked to another account.',
+        statusCode: 409,
+      });
+    }
+
+    // Verify OTP via MSG91
+    await msg91Service.verifyOTP(cleanPhone, otp);
+
+    const user = await User.findById(req.user._id);
+    if (!user) {
+      return error(res, { message: 'User not found.', statusCode: 404 });
+    }
+
+    user.phone = cleanPhone;
+    user.isPhoneVerified = true;
+    await user.save();
+
+    const userObj = user.toObject();
+    delete userObj.password;
+
+    return success(res, {
+      message: 'Mobile number linked successfully.',
+      data: { user: userObj },
+    });
+  } catch (err) {
+    return error(res, {
+      message: err.message || 'Failed to link mobile number.',
+      statusCode: 400,
+    });
+  }
+};
+
 module.exports = {
   register,
   login,
@@ -611,4 +807,8 @@ module.exports = {
   verifyResetToken,
   resetPassword,
   changePassword,
+  sendPhoneOTP,
+  verifyPhoneOTP,
+  retryPhoneOTP,
+  linkPhone,
 };
