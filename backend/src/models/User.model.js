@@ -9,10 +9,11 @@ const userSchema = new mongoose.Schema(
     },
     email: {
       type: String,
-      required: [true, 'Email is required'],
       unique: true,
+      sparse: true,
       lowercase: true,
       trim: true,
+      default: null,
     },
     password: {
       type: String,
@@ -172,5 +173,6 @@ const userSchema = new mongoose.Schema(
 
 // Removed duplicate index because email has unique: true
 userSchema.index({ googleId: 1 });
+userSchema.index({ phone: 1 }, { sparse: true });
 
 module.exports = mongoose.model('User', userSchema);
