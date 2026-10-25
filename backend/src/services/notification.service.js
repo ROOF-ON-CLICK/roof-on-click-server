@@ -10,10 +10,8 @@
  */
 
 const Notification = require('../models/Notification.model');
-const PushSubscription = require('../models/PushSubscription.model');
-const User = require('../models/User.model');
-const emailService = require('./email.service');
-const { webpush } = require('../config/webpush');
+const queueService = require('./queue.service');
+const { ROUTING_KEYS } = require('../config/rabbitmq');
 
 const N8N_WEBHOOK_URL = process.env.N8N_WEBHOOK_URL || null;
 const N8N_WEBHOOK_SECRET = process.env.N8N_WEBHOOK_SECRET || null;
@@ -187,43 +185,46 @@ async function createNotification({
     // 2. Real-time In-App Push via SSE to all open browser tabs for this user
     broadcastNotificationToUser(recipient, notification);
 
-    // 3. Fetch recipient details for Email delivery, Web Push, and Webhook
-    (async () => {
-      try {
-        // A. Dispatch Device-Level Web Push Notifications (if subscribed)
-        await sendWebPushNotification(recipient, notification);
+    // 3. Offload external I/O (Web Push, Email, Webhooks) to RabbitMQ background queues
+    await queueService.publishMessage(ROUTING_KEYS.NOTIFY_WEBPUSH, {
+      recipientId: recipient.toString(),
+      notification: {
+        _id: notification._id.toString(),
+        title: notification.title,
+        message: notification.message,
+        actionUrl: notification.actionUrl,
+        type: notification.type,
+        category: notification.category,
+      },
+    });
 
-        const recipientUser = await User.findById(recipient).select('name email phone role');
-        if (!recipientUser) return;
+    await queueService.publishMessage(ROUTING_KEYS.NOTIFY_EMAIL, {
+      recipientId: recipient.toString(),
+      notification: {
+        _id: notification._id.toString(),
+        title: notification.title,
+        message: notification.message,
+        actionUrl: notification.actionUrl,
+        type: notification.type,
+        category: notification.category,
+      },
+    });
 
-        // B. Dispatch Direct Transactional Email via Resend
-        await emailService.dispatchNotificationEmail(notification, recipientUser);
-
-        // C. Optional n8n Webhook Dispatch
-        if (N8N_WEBHOOK_URL) {
-          const webhookPayload = {
-            event: type,
-            timestamp: new Date().toISOString(),
-            notificationId: notification._id.toString(),
-            category,
-            title,
-            message,
-            actionUrl,
-            recipient: {
-              id: recipientUser._id.toString(),
-              name: recipientUser.name,
-              email: recipientUser.email,
-              phone: recipientUser.phone,
-              role: recipientUser.role,
-            },
-            metadata,
-          };
-          await dispatchN8NWebhook(webhookPayload);
-        }
-      } catch (asyncErr) {
-        console.error('[notification.service] Async dispatch error:', asyncErr.message);
-      }
-    })();
+    if (N8N_WEBHOOK_URL) {
+      await queueService.publishMessage(ROUTING_KEYS.WEBHOOK_N8N, {
+        payload: {
+          event: type,
+          timestamp: new Date().toISOString(),
+          notificationId: notification._id.toString(),
+          category,
+          title,
+          message,
+          actionUrl,
+          recipientId: recipient.toString(),
+          metadata,
+        },
+      });
+    }
 
     return notification;
   } catch (err) {
